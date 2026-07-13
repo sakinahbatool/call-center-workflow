@@ -1,1047 +1,574 @@
-import axios from "axios";
-import React, { useCallback, useRef, useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactFlow, {
   addEdge,
-  applyEdgeChanges,
-  applyNodeChanges,
   Background,
   Controls,
   MiniMap,
-  useNodesState,
+  MarkerType,
+  getConnectedEdges,
   useEdgesState,
-  getConnectedEdges
+  useNodesState,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
+
 import Sidebar from './Components/Sidebar';
 import EditableNode from './Components/EditableNode';
 import EditableEdge from './Components/EditableEdge';
-import LoadingSpinner from './Components/LoadingSpinner';
-import ExtensibleFunctionNode from './Components/ExtensibleFunctionNode';
-import nodeTemplates from "./utils/nodeTemplates";
-import { predefinedFunctions } from './utils/nodeTemplates'
-import FunctionEditorModal from './Components/FunctionEditorModal';
-import DebuggerPanel from './Components/DebuggerPanel';
-import { simulateNodeExecution } from './utils/FlowExecutor';
+import ConfigSidebar from './Components/ConfigSidebar';
+import WorkflowActions from './Components/WorkflowActions';
+import SimulationPanel from './Components/SimulationPanel';
 
-const nodeTypes = {
-  editableNode: EditableNode,
-  extensibleFunction: ExtensibleFunctionNode
-};
+import nodeTemplates, { getNodeFields } from './utils/nodeTemplates';
+import { compileWorkflow, DEFAULT_WORKFLOW_META } from './utils/workflowCompiler';
+import { getByPath, isEmptyValue, setByPath } from './utils/objectPath';
+import { getConnectionError, isConnectionAllowed } from './utils/connectionRules';
 
+const nodeTypes = { workflowNode: EditableNode };
 const edgeTypes = { editableEdge: EditableEdge };
-let nodeCounter = 1;
-let edgeCounter = 1;
 
-const getSimpleNodeId = (type) => `${type}_${nodeCounter++}`;
-const getSimpleEdgeId = (source, target) => `edge_${edgeCounter++}_${source}_${target}`;
+function clone(value) {
+  if (typeof structuredClone === 'function') return structuredClone(value);
+  return JSON.parse(JSON.stringify(value));
+}
 
+function makeEdgeId(source, target, index) {
+  return `edge_${index}_${source}_${target}`;
+}
 
-const generateNodeCode = (node, allNodeTemplates, part = 'all') => {
-  if (!node) return "";
-  const template = allNodeTemplates[node.data.nodeType];
-  if (!template) return "";
+function getNodeNumber(nodes, type) {
+  const sameTypeCount = nodes.filter((node) => node.data?.nodeType === type).length;
+  return sameTypeCount + 1;
+}
 
-  let nodeCode = "";
-  const nodeType = node.data.nodeType;
-  let runPlaceholderReplacement = false;
+function getNextEdgeNumber(edges) {
+  return edges.length + 1;
+}
 
-  if (nodeType === 'HandleTransaction') {
-    const parts = template.functionTemplate.split('{{USER_CODE}}');
-    if (part === 'start') nodeCode = parts[0] || '';
-    else if (part === 'end') nodeCode = parts[1] || '';
-    else {
-      nodeCode = template.mainFlowTemplate || '';
-      runPlaceholderReplacement = true;
+function ToolbarGroup({ children }) {
+  return (
+    <div className="flex items-center gap-0.5 pr-3 mr-2 border-r border-slate-200 last:border-r-0 last:mr-0 last:pr-0">
+      {children}
+    </div>
+  );
+}
+
+function ToolbarButton({ icon, label, onClick, title, primary }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className={`h-11 min-w-[54px] px-2.5 rounded-md flex flex-col items-center justify-center gap-0.5 text-[10.5px] font-semibold leading-none transition-colors ${
+        primary
+          ? 'bg-blue-600 text-white hover:bg-blue-700'
+          : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+      }`}
+    >
+      <span className="text-[15px] leading-none">{icon}</span>
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function validateWorkflowState({ workflowMeta, nodes, edges }) {
+  const errors = [];
+  const warnings = [];
+
+  if (!workflowMeta.workflow_id?.trim()) errors.push('Workflow ID is required.');
+  if (!workflowMeta.name?.trim()) errors.push('Workflow name is required.');
+  if (!workflowMeta.phone_number?.trim()) warnings.push('Phone number is empty.');
+
+  nodes.forEach((node) => {
+    const template = nodeTemplates[node.data?.nodeType];
+    if (!template) {
+      errors.push(`${node.id}: unknown node type.`);
+      return;
     }
-  }
 
-  else if (nodeType === 'CustomFunction') {
-    const params = node.data.params || {};
-    const funcName = params.functionName || 'myFunction';
-    const funcParams = params.functionParams || '';
-    const funcArgs = params.functionArgs || '';
-    const resultVar = params.resultVar || '';
+    getNodeFields(node.data?.nodeType, node.data?.config || {}).forEach((field) => {
+      if (!field.required) return;
+      const value = getByPath(node.data?.config || {}, field.key);
+      if (isEmptyValue(value)) errors.push(`${node.id}: ${field.label} is required.`);
+    });
+  });
 
-    if (part === 'start') nodeCode = `async function ${funcName}(${funcParams}) {`;
-    else if (part === 'end') nodeCode = `}`;
-    else {
-      runPlaceholderReplacement = true;
-      if (resultVar) nodeCode = `const ${resultVar} = await ${funcName}(${funcArgs});`;
-      else nodeCode = `await ${funcName}(${funcArgs});`;
+  edges.forEach((edge) => {
+    const source = nodes.find((node) => node.id === edge.source);
+    const target = nodes.find((node) => node.id === edge.target);
+    if (!source || !target) {
+      errors.push(`${edge.id}: source or target node is missing.`);
+      return;
     }
-  }
 
-  else if (nodeType === 'If') {
-    if (part === 'start') {
-      nodeCode = `if ({{condition}}) {`;
-      runPlaceholderReplacement = true;
+    const allowed = isConnectionAllowed(source.data?.nodeType, target.data?.nodeType);
+    if (!allowed) {
+      errors.push(`${edge.id}: ${getConnectionError(source.data?.nodeType, target.data?.nodeType)}`);
     }
-    else if (part === 'end') {
-      nodeCode = `}`;
-    }
-    else {
-      nodeCode = template.codeTemplate;
-      runPlaceholderReplacement = true;
-    }
-  }
+  });
 
-  else if (template.isExtensible) {
-    const parts = (template.functionTemplate || '').split('{{USER_CODE}}');
-    if (part === 'start') nodeCode = parts[0] || '';
-    else if (part === 'end') nodeCode = parts[1] || '}';
-    else {
-      nodeCode = template.mainFlowTemplate || '';
-      runPlaceholderReplacement = true;
-    }
-  }
+  const hasTrigger = nodes.some((node) => [
+    'webhook',
+    'schedule',
+    'whatsapp_trigger',
+    'sms_trigger',
+    'slack_trigger',
+    'email_trigger',
+  ].includes(node.data?.nodeType));
 
-  else {
-    nodeCode = template.codeTemplate;
-    runPlaceholderReplacement = true;
-  }
+  if (!hasTrigger) warnings.push('No trigger node found. Add webhook, schedule, WhatsApp, SMS, Slack, or email trigger.');
+  if (!nodes.some((node) => node.data?.nodeType === 'voice_agent')) errors.push('At least one voice_agent node is required.');
+  if (edges.length === 0) warnings.push('No connections found.');
 
-  if (nodeCode && runPlaceholderReplacement) {
-    if (node.data?.params) {
-      Object.entries(node.data.params).forEach(([key, value]) => {
-        const placeholder = new RegExp(`{{${key}}}`, 'g');
-        nodeCode = nodeCode.replace(placeholder, value || '');
-      });
-    }
-    if (template.inputs) {
-      template.inputs.forEach(input => {
-        const placeholder = new RegExp(`{{${input.key}}}`, 'g');
-        nodeCode = nodeCode.replace(placeholder, input.defaultValue);
-      });
-    }
-  }
+  nodes
+    .filter((node) => node.data?.nodeType === 'webhook')
+    .forEach((node) => {
+      const targetId = node.data?.config?.voice_agent_to_activate;
+      if (targetId && !nodes.some((item) => item.id === targetId && item.data?.nodeType === 'voice_agent')) {
+        errors.push(`${node.id}: voice_agent_to_activate must match an existing voice_agent node ID.`);
+      }
+    });
 
-  return nodeCode ? '  ' + nodeCode : '';
-};
-
+  return { errors, warnings };
+}
 
 export default function App() {
-  const reactFlowWrapper = useRef(null);
+  const wrapperRef = useRef(null);
   const [reactFlowInstance, setReactFlowInstance] = useState(null);
-
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
-  const [exportJson, setExportJson] = useState(null);
-  const [generatedCode, setGeneratedCode] = useState("");
-  const [view, setView] = useState('json');
-  const [isLoading, setIsLoading] = useState(false);
-  const [editingFunction, setEditingFunction] = useState(null);
-  const [isFunctionModalOpen, setIsFunctionModalOpen] = useState(false);
-
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isAnimationModalOpen, setIsAnimationModalOpen] = useState(false);
-  const [animatingNode, setAnimatingNode] = useState(null);
-  const [debugVariables, setDebugVariables] = useState({});
-  const [debugLogs, setDebugLogs] = useState([]);
-
-  const animationTimeoutRef = useRef(null);
-  const resumeCallbackRef = useRef(null);
-
-  const nodesRef = useRef(nodes);
-  const edgesRef = useRef(edges);
-  const flowVarsRef = useRef({});
-
-  useEffect(() => {
-    nodesRef.current = nodes;
-    edgesRef.current = edges;
-  }, [nodes, edges]);
-
-  const allNodeTemplates = { ...nodeTemplates, ...predefinedFunctions };
+  const [workflowMeta, setWorkflowMeta] = useState(DEFAULT_WORKFLOW_META);
+  const [rightPanelWidth, setRightPanelWidth] = useState(420);
+  const [connectionError, setConnectionError] = useState('');
+  const [simulationOpen, setSimulationOpen] = useState(false);
 
   const historyRef = useRef([]);
   const redoRef = useRef([]);
 
+  const saveEndpoint = import.meta.env.VITE_WORKFLOW_SAVE_API || '';
+
+  const selectedNode = useMemo(() => nodes.find((node) => node.selected) || null, [nodes]);
+
+  const workflowJson = useMemo(() => {
+    return compileWorkflow({ workflowMeta, nodes, edges });
+  }, [workflowMeta, nodes, edges]);
+
   const pushHistory = useCallback(() => {
-    historyRef.current.push({ nodes: JSON.parse(JSON.stringify(nodes)), edges: JSON.parse(JSON.stringify(edges)) });
+    historyRef.current.push({
+      nodes: clone(nodes),
+      edges: clone(edges),
+      workflowMeta: clone(workflowMeta),
+    });
     redoRef.current = [];
-  }, [nodes, edges]);
+  }, [nodes, edges, workflowMeta]);
+
+  const undo = useCallback(() => {
+    const prev = historyRef.current.pop();
+    if (!prev) return;
+
+    redoRef.current.push({
+      nodes: clone(nodes),
+      edges: clone(edges),
+      workflowMeta: clone(workflowMeta),
+    });
+
+    setNodes(prev.nodes);
+    setEdges(prev.edges);
+    setWorkflowMeta(prev.workflowMeta);
+  }, [nodes, edges, workflowMeta, setNodes, setEdges]);
+
+  const redo = useCallback(() => {
+    const next = redoRef.current.pop();
+    if (!next) return;
+
+    historyRef.current.push({
+      nodes: clone(nodes),
+      edges: clone(edges),
+      workflowMeta: clone(workflowMeta),
+    });
+
+    setNodes(next.nodes);
+    setEdges(next.edges);
+    setWorkflowMeta(next.workflowMeta);
+  }, [nodes, edges, workflowMeta, setNodes, setEdges]);
+
+
+  const clearWorkflow = useCallback(() => {
+    const hasContent = nodes.length || edges.length;
+    if (!hasContent) return;
+
+    const confirmed = window.confirm('This will clear the current canvas. Continue?');
+    if (!confirmed) return;
+
+    pushHistory();
+    setNodes([]);
+    setEdges([]);
+    setWorkflowMeta(DEFAULT_WORKFLOW_META);
+  }, [nodes.length, edges.length, pushHistory, setEdges, setNodes]);
 
   useEffect(() => {
-    const handleKeyDown = (e) => {
+    const onKeyDown = (event) => {
       const activeTag = document.activeElement?.tagName?.toLowerCase();
-      const isTypING = activeTag === 'input' || activeTag === 'textarea' || document.activeElement?.isContentEditable;
+      const isTyping = activeTag === 'input' || activeTag === 'textarea' || document.activeElement?.isContentEditable;
+      if (isTyping) return;
 
-      if (isTypING || isPlaying || isFunctionModalOpen) return;
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        const selectedNodes = nodes.filter((node) => node.selected);
+        const selectedEdges = edges.filter((edge) => edge.selected);
+        if (!selectedNodes.length && !selectedEdges.length) return;
 
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        e.preventDefault();
-        const selectedNodes = nodes.filter((n) => n.selected);
-        const selectedEdges = edges.filter((e) => e.selected);
+        event.preventDefault();
+        pushHistory();
+
         const connectedEdges = getConnectedEdges(selectedNodes, edges);
-        const edgesToDelete = [...selectedEdges, ...connectedEdges];
-        const edgeIdsToDelete = new Set(edgesToDelete.map(e => e.id));
-        setNodes((nds) => nds.filter((n) => !n.selected));
-        setEdges((eds) => eds.filter((e) => !edgeIdsToDelete.has(e.id)));
+        const edgeIdsToDelete = new Set([...selectedEdges, ...connectedEdges].map((edge) => edge.id));
+        const nodeIdsToDelete = new Set(selectedNodes.map((node) => node.id));
+
+        setNodes((current) => current.filter((node) => !nodeIdsToDelete.has(node.id)));
+        setEdges((current) => current.filter((edge) => !edgeIdsToDelete.has(edge.id)));
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
-        e.preventDefault();
-        if (historyRef.current.length === 0) return;
-        const prev = historyRef.current[historyRef.current.length - 1];
-        redoRef.current.push({ nodes: JSON.parse(JSON.stringify(nodes)), edges: JSON.parse(JSON.stringify(edges)) });
-        setNodes(prev.nodes);
-        setEdges(prev.edges);
-        historyRef.current = historyRef.current.slice(0, -1);
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        undo();
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
-        e.preventDefault();
-        if (redoRef.current.length === 0) return;
-        const next = redoRef.current[redoRef.current.length - 1];
-        historyRef.current.push({ nodes: JSON.parse(JSON.stringify(nodes)), edges: JSON.parse(JSON.stringify(edges)) });
-        setNodes(next.nodes);
-        setEdges(next.edges);
-        redoRef.current = redoRef.current.slice(0, -1);
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        redo();
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [nodes, edges, setNodes, setEdges, isPlaying, isFunctionModalOpen]);
-
-  useEffect(() => {
-    return () => {
-      if (animationTimeoutRef.current) {
-        clearTimeout(animationTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  const createNodeOnParamChange = useCallback((nodeId) => (paramKey, value) => {
-    pushHistory();
-    setNodes((ns) => ns.map((n) => {
-      if (n.id === nodeId) {
-        const currentParams = n.data.params || {};
-        let updatedParams;
-        if (value === '') {
-          updatedParams = { ...currentParams };
-          delete updatedParams[paramKey];
-        } else {
-          updatedParams = { ...currentParams, [paramKey]: value };
-        }
-        return {
-          ...n,
-          data: { ...n.data, params: updatedParams }
-        };
-      }
-      return n;
-    }));
-  }, [setNodes, pushHistory]);
-
-  const createNodeOnChange = useCallback((nodeId) => (value) => {
-    pushHistory();
-    setNodes((ns) => ns.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, label: value } } : n)));
-  }, [setNodes, pushHistory]);
-
-  const createEdgeOnChange = useCallback((edgeId) => (value) => {
-    pushHistory();
-    setEdges((es) => es.map((e) => (e.id === edgeId ? { ...e, data: { ...e.data, label: value } } : e)));
-  }, [setEdges, pushHistory]);
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [nodes, edges, pushHistory, redo, setEdges, setNodes, undo]);
 
   const onConnect = useCallback((params) => {
-    pushHistory();
-    const id = getSimpleEdgeId(params.source, params.target);
-    const newEdge = {
-      id, source: params.source, target: params.target,
-      type: 'editableEdge',
-      data: { label: '', onChange: createEdgeOnChange(id) },
-      animated: false,
-    };
-    setEdges((eds) => addEdge(newEdge, eds));
-  }, [setEdges, createEdgeOnChange, pushHistory]);
+    const sourceNode = nodes.find((node) => node.id === params.source);
+    const targetNode = nodes.find((node) => node.id === params.target);
+    const sourceType = sourceNode?.data?.nodeType;
+    const targetType = targetNode?.data?.nodeType;
 
-  const onInit = useCallback((instance) => {
-    setReactFlowInstance(instance);
-  }, []);
-
-  const handleEditFunction = useCallback((nodeId) => {
-    if (!reactFlowInstance) return;
-    const currentNodes = reactFlowInstance.getNodes();
-    const functionNode = currentNodes.find(n => n.id === nodeId);
-    if (!functionNode) return;
-    setEditingFunction(functionNode);
-    setIsFunctionModalOpen(true);
-  }, [reactFlowInstance]);
-
-
-  const onDrop = useCallback((event) => {
-    event.preventDefault();
-    if (!reactFlowWrapper.current || !reactFlowInstance) return;
-    const reactFlowBounds = reactFlowWrapper.current.getBoundingClientRect();
-    const type = event.dataTransfer.getData('application/reactflow');
-    if (!type) return;
-    const position = reactFlowInstance.project({
-      x: event.clientX - reactFlowBounds.left,
-      y: event.clientY - reactFlowBounds.top,
-    });
-    const id = getSimpleNodeId(type);
-    const template = allNodeTemplates[type];
-    const isExtensible = template?.isExtensible;
-    if (isExtensible) {
-      const newNode = {
-        id, type: 'extensibleFunction', position,
-        data: {
-          label: template.displayName,
-          onParamChange: createNodeOnParamChange(id),
-          onEdit: () => handleEditFunction(id),
-          nodeType: type, params: {}, userNodes: [], userEdges: []
-        },
-      };
-      pushHistory();
-      setNodes((nds) => nds.concat(newNode));
-    } else {
-      const newNode = {
-        id, type: 'editableNode', position,
-        data: {
-          label: template.displayName,
-          onChange: createNodeOnChange(id),
-          onParamChange: createNodeOnParamChange(id),
-          nodeType: type, params: {}
-        },
-      };
-      pushHistory();
-      setNodes((nds) => nds.concat(newNode));
+    if (!isConnectionAllowed(sourceType, targetType)) {
+      const message = getConnectionError(sourceType, targetType);
+      setConnectionError(message);
+      window.setTimeout(() => setConnectionError(''), 4000);
+      return;
     }
-  }, [reactFlowInstance, createNodeOnChange, createNodeOnParamChange, setNodes, pushHistory, handleEditFunction, allNodeTemplates]);
+
+    pushHistory();
+    const edgeNumber = getNextEdgeNumber(edges);
+    const id = makeEdgeId(params.source, params.target, edgeNumber);
+
+    const newEdge = {
+      id,
+      source: params.source,
+      target: params.target,
+      type: 'editableEdge',
+      markerEnd: { type: MarkerType.ArrowClosed },
+      data: { label: 'sequence' },
+    };
+
+    setEdges((current) => addEdge(newEdge, current));
+  }, [edges, nodes, pushHistory, setEdges]);
 
   const onDragOver = useCallback((event) => {
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
   }, []);
 
-  const handleSaveFunction = useCallback((updatedFunctionNode) => {
-    pushHistory();
-    setNodes((ns) => ns.map((n) =>
-      n.id === updatedFunctionNode.id ? updatedFunctionNode : n
-    ));
-    setEditingFunction(null);
-    setIsFunctionModalOpen(false);
-  }, [setNodes, pushHistory]);
+  const onDrop = useCallback((event) => {
+    event.preventDefault();
+    if (!wrapperRef.current || !reactFlowInstance) return;
 
+    const nodeType = event.dataTransfer.getData('application/reactflow');
+    const template = nodeTemplates[nodeType];
+    if (!template) return;
 
-  const getFlowPayload = useCallback(() => {
-    const simplifiedNodes = nodes.map(node => ({
-      id: node.id,
-      label: node.data?.label,
-      type: node.data?.nodeType,
-      params: node.data?.params || {}
-    }));
-    const simplifiedEdges = edges.map(edge => {
-      const sourceNode = nodes.find(n => n.id === edge.source);
-      const targetNode = nodes.find(n => n.id === edge.target);
-      return {
-        id: edge.id,
-        from: sourceNode?.data?.label || edge.source,
-        to: targetNode?.data?.label || edge.target,
-        label: edge.data?.label || '',
-      };
+    const bounds = wrapperRef.current.getBoundingClientRect();
+    const position = reactFlowInstance.project({
+      x: event.clientX - bounds.left,
+      y: event.clientY - bounds.top,
     });
-    const flowConnections = simplifiedEdges.map(e => `${e.from} → ${e.to}`);
-    const payload = {
-      nodes: simplifiedNodes,
-      edges: simplifiedEdges,
-      flow: flowConnections,
+
+    const id = `${nodeType}_${getNodeNumber(nodes, nodeType)}`;
+    const newNode = {
+      id,
+      type: 'workflowNode',
+      position,
+      data: {
+        label: template.displayName,
+        nodeType,
+        config: clone(template.defaultConfig),
+      },
     };
-    return payload;
-  }, [nodes, edges]);
 
-  const displayJson = useCallback(() => {
-    if (nodes.length === 0) {
-      alert("Flowchart is empty. Add some nodes first.");
-      return;
+    pushHistory();
+    setNodes((current) => current.concat(newNode));
+  }, [nodes, pushHistory, reactFlowInstance, setNodes]);
+
+  const updateWorkflowMeta = useCallback((key, value) => {
+    pushHistory();
+    setWorkflowMeta((current) => ({ ...current, [key]: value }));
+  }, [pushHistory]);
+
+  const updateNodeConfig = useCallback((nodeId, path, value) => {
+    pushHistory();
+    setNodes((current) => current.map((node) => {
+      if (node.id !== nodeId) return node;
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          config: setByPath(node.data.config || {}, path, value),
+        },
+      };
+    }));
+  }, [pushHistory, setNodes]);
+
+  const validateNow = useCallback(() => {
+    const result = validateWorkflowState({ workflowMeta, nodes, edges });
+    if (result.errors.length || result.warnings.length) {
+      console.group('Workflow Validation');
+      result.errors.forEach((error) => console.error(error));
+      result.warnings.forEach((warning) => console.warn(warning));
+      console.groupEnd();
     }
-    const payload = getFlowPayload();
-    setExportJson(payload);
-    setView('json');
-    console.log('Exported Flow JSON:', payload);
-  }, [nodes, edges, getFlowPayload]);
+    return result;
+  }, [edges, nodes, workflowMeta]);
 
-  const generateInternalFlow = useCallback((flowNodes, flowEdges) => {
-    let internalCode = '';
-    if (!flowNodes || flowNodes.length === 0) {
-      return '// No custom logic\n';
-    }
-
-    let startNode = flowNodes.find(n => n.data?.nodeType === 'Start');
-    if (startNode) {
-      const startEdge = flowEdges.find(e => e.source === startNode.id);
-      if (startEdge) {
-        startNode = flowNodes.find(n => n.id === startEdge.target);
-      } else {
-        startNode = null;
-      }
-    } else {
-      const targetNodeIds = new Set(flowEdges.map(e => e.target));
-      startNode = flowNodes.find(n => !targetNodeIds.has(n.id));
-
-      if (!startNode) startNode = flowNodes[0];
-    }
-
-    let currentNode = startNode;
-    const visited = new Set();
-
-    while (currentNode && !visited.has(currentNode.id)) {
-      visited.add(currentNode.id);
-      const template = allNodeTemplates[currentNode.data.nodeType];
-
-      if (template) {
-        let nodeCode = template.mainFlowTemplate || template.codeTemplate;
-
-        if (nodeCode) {
-          if (currentNode.data?.params) {
-            Object.entries(currentNode.data.params).forEach(([key, value]) => {
-              const placeholder = new RegExp(`{{${key}}}`, 'g');
-              nodeCode = nodeCode.replace(placeholder, value);
-            });
-          }
-
-          if (currentNode.data.nodeType === 'If') {
-            const trueBranchEdge = flowEdges.find(edge => edge.source === currentNode.id);
-
-            if (trueBranchEdge) {
-              const nextNode = flowNodes.find(n => n.id === trueBranchEdge.target);
-
-              let innerCode = "";
-              let innerCurrent = nextNode;
-
-              while (innerCurrent) {
-                if (visited.has(innerCurrent.id)) break;
-                visited.add(innerCurrent.id);
-
-                const innerTemplate = allNodeTemplates[innerCurrent.data.nodeType];
-                if (innerTemplate) {
-                  let c = innerTemplate.mainFlowTemplate || innerTemplate.codeTemplate;
-                  if (innerCurrent.data?.params) {
-                    Object.entries(innerCurrent.data.params).forEach(([k, v]) => {
-                      c = c.replace(new RegExp(`{{${k}}}`, 'g'), v);
-                    });
-                  }
-                  innerCode += "  " + c + "\n";
-                }
-
-                const innerEdge = flowEdges.find(e => e.source === innerCurrent.id);
-                innerCurrent = innerEdge ? flowNodes.find(n => n.id === innerEdge.target) : null;
-              }
-
-              nodeCode = nodeCode.replace(/\{\{\s*TRUE_BRANCH\s*\}\}/, innerCode);
-            } else {
-              nodeCode = nodeCode.replace(/\{\{\s*TRUE_BRANCH\s*\}\}/, '  // True branch\n');
-            }
-
-            internalCode += nodeCode + '\n';
-
-            currentNode = null;
-            break;
-          }
-
-          if (template.inputs) {
-            template.inputs.forEach(input => {
-              const placeholder = new RegExp(`{{${input.key}}}`, 'g');
-              nodeCode = nodeCode.replace(placeholder, input.defaultValue);
-            });
-          }
-
-          internalCode += nodeCode + '\n';
-        }
-      }
-
-      const outgoingEdge = flowEdges.find(edge => edge.source === currentNode.id);
-      if (outgoingEdge) {
-        currentNode = flowNodes.find(node => node.id === outgoingEdge.target);
-      } else {
-        currentNode = null;
-      }
-    }
-
-    return internalCode;
-  }, [allNodeTemplates]);
-
-  const generateBranchCode = useCallback((startNodeId, allNodes, allEdges, visitedNodes) => {
-    let branchCode = '';
-    let currentNode = allNodes.find(n => n.id === startNodeId);
-    while (currentNode && !visitedNodes.has(currentNode.id)) {
-      visitedNodes.add(currentNode.id);
-      const template = allNodeTemplates[currentNode.data.nodeType];
-      if (template && currentNode.data.nodeType !== 'If') {
-        let nodeCode = template.codeTemplate;
-        if (currentNode.data?.params) {
-          Object.entries(currentNode.data.params).forEach(([key, value]) => {
-            const placeholder = new RegExp(`{{${key}}}`, 'g');
-            nodeCode = nodeCode.replace(placeholder, value);
-          });
-        }
-        branchCode += '  ' + nodeCode;
-      }
-      const outgoingEdge = allEdges.find(edge => edge.source === currentNode.id);
-      if (outgoingEdge) {
-        currentNode = allNodes.find(node => node.id === outgoingEdge.target);
-      } else {
-        currentNode = null;
-      }
-    }
-    return branchCode;
-  }, [allNodeTemplates]);
-
-  const generateTypescriptFromFlow = useCallback(() => {
-    if (nodes.length === 0) {
-      alert("Flowchart is empty.");
+  const showValidation = useCallback(() => {
+    const result = validateNow();
+    if (!result.errors.length && !result.warnings.length) {
+      window.alert('Validation passed.');
       return;
     }
 
-    // 1. FIND START NODE
-    const startNode = nodes.find(node => node.data?.nodeType === 'Start');
-    if (!startNode) {
-      alert("No Start node found in the flowchart.");
-      return;
-    }
+    const message = [
+      result.errors.length ? `Errors:\n- ${result.errors.join('\n- ')}` : '',
+      result.warnings.length ? `Warnings:\n- ${result.warnings.join('\n- ')}` : '',
+    ].filter(Boolean).join('\n\n');
 
-    setIsLoading(true);
+    window.alert(message);
+  }, [validateNow]);
 
-    setTimeout(() => {
-      try {
-        // 2. CALCULATE REACHABILITY (Graph Traversal)
-        // This ensures we only generate code for nodes actually connected to Start
-        const reachableIds = new Set();
-        const queue = [startNode.id];
-        reachableIds.add(startNode.id);
+  const highlightSimulationNode = useCallback((nodeId) => {
+    setNodes((current) => current.map((node) => ({
+      ...node,
+      data: {
+        ...node.data,
+        isSimulating: node.id === nodeId,
+      },
+    })));
+  }, [setNodes]);
 
-        while (queue.length > 0) {
-          const currId = queue.shift();
-          // Find all edges leaving this node (handles If branches, loops, etc.)
-          const outgoingEdges = edges.filter(e => e.source === currId);
+  const addLatestExampleWorkflow = useCallback(() => {
+    const confirmed = nodes.length || edges.length
+      ? window.confirm('This will replace the current canvas with the latest example workflow. Continue?')
+      : true;
+    if (!confirmed) return;
 
-          outgoingEdges.forEach(edge => {
-            if (!reachableIds.has(edge.target)) {
-              reachableIds.add(edge.target);
-              queue.push(edge.target);
-            }
-          });
-        }
+    pushHistory();
 
-        // 3. FILTER NODES
-        // Only work with nodes that were found in the traversal
-        const validNodes = nodes.filter(n => reachableIds.has(n.id));
+    const exampleNodes = [
+      ['memory_runtime_context', 'memory', 80, 80, { use_memory: true, context_last_messages: 8, save_conversation_history: true }],
+      ['schedule_weekly_call', 'schedule', 80, 240, { schedule_type: 'weekly', day_of_week: 'monday', time: '10:30', timezone: 'Asia/Karachi', total_calls: 4 }],
+      ['summarizer_call_notes', 'summarizer', 80, 400, { instruction: 'Create a concise post-call summary for a banking support supervisor. Include caller intent, key questions, answers given, tools or knowledge base facts used, unresolved issues, promised follow-ups, and overall outcome. Do not include raw tool-call syntax.' }],
+      ['kb_nbp_docs', 'knowledge_base', 80, 580, { description: 'Banking support documents used to ground factual answers.', files: [{ id: 'nbp_product_pdf', path: 'NBP.pdf', metadata: { title: 'NBP Product Document' } }] }],
+      ['webhook_inbound_trigger', 'webhook', 80, 780, { webhook_url: 'https://example.com/webhooks/voice-workflow', active_time_window: { timezone: 'Asia/Karachi', start_time: '09:00', end_time: '18:00', days: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'] }, allowed_trigger_source: 'frontend_workflow_builder', trigger_action: 'start_outbound_call', voice_agent_to_activate: 'voice_agent_support' }],
+      ['whatsapp_trigger_customer_message', 'whatsapp_trigger', 80, 980, { whatsapp_number: '+923001234567', incoming_message_condition: 'Start when a customer sends a WhatsApp message containing a support request.', customer_phone_number: '{{incoming.customer_phone_number}}', message_content: '{{incoming.message_content}}' }],
+      ['sms_trigger_customer_message', 'sms_trigger', 80, 1140, { sms_number: '+923001234567', incoming_message_condition: 'Start when an incoming SMS contains a banking support question.' }],
+      ['slack_trigger_support_message', 'slack_trigger', 80, 1300, { workspace: 'NBP Support Workspace', channel: 'customer-escalations', trigger_keyword: 'urgent-support', sender: '{{incoming.sender}}', message_content: '{{incoming.message_content}}' }],
+      ['email_trigger_support_request', 'email_trigger', 80, 1480, { email_inbox: 'support@example.com', sender_condition: 'Accept messages from customers and approved partner domains.', subject_condition: 'Subject contains support, account, card, transfer, complaint, or app.', body_condition: 'Body contains a customer-service request related to NBP banking services.' }],
 
-        let functionDefinitions = '// --- Function Definitions ---\n';
-        let mainFlowCode = '\n// --- Main Flow ---\n';
+      ['voice_agent_support', 'voice_agent', 560, 620, { company_name: 'National Bank of Pakistan', company_description: 'A banking organization that supports account, card, transfer, mobile app, and customer-service questions.', voice_agent_name: 'Malik', agent_gender: 'male', main_prompt: 'Help callers with NBP banking questions in the same language they use. Use clear English for English callers and simple Pakistani Roman Urdu for Urdu or mixed Urdu callers. Keep answers brief, direct, and phone-friendly. Ask one short clarification question if the caller intent is unclear, and never make up policy details.', dos: ['Reply in English when the caller speaks English.', 'Reply in simple Pakistani Roman Urdu when the caller speaks Urdu, Roman Urdu, or mixed Urdu.', 'Keep every answer concise: normally 1-3 short spoken sentences.', 'Use knowledge base facts for product, fee, card, account, transfer, app, or policy questions.', 'Ask one short clarification question if the caller intent is unclear.'], donts: ['Do not mention internal workflow nodes, vector databases, embeddings, retrieved chunks, or tool calls.', 'Do not answer outside the company support domain.', 'Do not invent fees, limits, requirements, policies, or timelines.', 'Do not give long explanations unless the caller asks for details.', 'Do not use markdown, bullet points, headings, or numbered lists in spoken replies.'], initial_greeting: 'Hello, Malik speaking from National Bank of Pakistan. How can I help you?', purpose: 'Provide concise NBP customer support over a live outbound voice call, answer banking questions accurately, and use the knowledge base for factual policy or product details.' }],
+      ['tool_call_kb_lookup', 'tool_call', 980, 220, { condition: 'Use this tool when the caller asks a specific factual question about accounts, cards, transfers, app login, OTP, PIN, fees, limits, requirements, complaints, or branch services.' }],
+      ['message_out_of_scope', 'message', 980, 400, { condition: 'Use when the caller asks anything unrelated to banking, NBP, accounts, cards, transfers, mobile app, OTP, PIN, fees, limits, requirements, complaints, or branch services.', message: 'This is out of my scope. I can only give you answers related to banking.' }],
+      ['db_logs_call_record', 'db_logs', 980, 580, { save_fields: { call_from: true, call_to: true, call_transcription: true, call_summary: true, call_time_and_date: true, call_status: true } }],
+      ['llm_custom_processing', 'llm', 980, 760, { prompt: 'Analyze the current conversation context and decide the next best action for this workflow. Keep the result concise and operational.' }],
+      ['end_call_when_resolved', 'end_call', 980, 940, { condition: 'Use when the caller confirms they have no more questions, says goodbye, asks to end the call, or the workflow goal is completed.', message_before_ending: 'Thank you for contacting us. Khuda hafiz.' }],
 
-        // 4. GENERATE FUNCTION DEFINITIONS (Only for reachable nodes)
-        const functionNodes = validNodes.filter(n =>
-          n.data.nodeType !== 'HandleTransaction' &&
-          allNodeTemplates[n.data.nodeType]?.isExtensible
-        );
+      ['messaging_whatsapp_reply', 'messaging_app', 980, 1120, { app_type: 'whatsapp_message', recipient_number: '{{whatsapp_trigger_customer_message.customer_phone_number}}', message_text: 'Thank you for contacting National Bank of Pakistan. How can we help you today?', template_name: 'customer_support_reply', variables: { customer_name: '{{customer.name}}', company_name: 'National Bank of Pakistan' } }],
+      ['messaging_sms_reply', 'messaging_app', 980, 1300, { app_type: 'sms_message', recipient_number: '{{incoming.sender_number}}', message_text: 'Thank you for contacting NBP support. Please share your question, but never send your PIN or OTP.' }],
+      ['messaging_slack_update', 'messaging_app', 980, 1480, { app_type: 'slack_message', workspace: 'NBP Support Workspace', channel_or_user: 'customer-escalations', message_text: 'A customer support interaction requires review.', attach_call_summary: true }],
+      ['messaging_email_reply', 'messaging_app', 980, 1660, { app_type: 'email_send', to: ['{{email_trigger_support_request.sender_email}}'], cc: [], bcc: [], subject: 'Re: {{email_trigger_support_request.subject}}', body: 'Thank you for contacting National Bank of Pakistan support. We received your request and will assist you shortly.' }],
 
-        functionNodes.forEach(funcNode => {
-          const template = allNodeTemplates[funcNode.data.nodeType];
-          let functionWrapper = '';
+      ['tool_call_mysql_lookup', 'tool_call', 1400, 220, { condition: 'Use this tool only when the workflow needs permitted customer or operational data stored in the connected MySQL database.' }],
+      ['mysql_customer_database', 'database_connection', 1780, 220, { database_type: 'mysql_connection', connection_string: '${SECRET:MYSQL_CONNECTION_STRING}', connection_timeout_seconds: 30, ssl_enabled: true, read_only: true }],
+      ['tool_call_postgresql_lookup', 'tool_call', 1400, 420, { condition: 'Use this tool only when the workflow needs permitted customer or operational data stored in the connected PostgreSQL database.' }],
+      ['postgresql_customer_database', 'database_connection', 1780, 420, { database_type: 'postgresql_connection', connection_string: '${SECRET:POSTGRESQL_CONNECTION_STRING}', connection_timeout_seconds: 30, ssl_enabled: true, read_only: true }],
+      ['tool_call_microsoft_sql_lookup', 'tool_call', 1400, 620, { condition: 'Use this tool only when the workflow needs permitted customer or operational data stored in the connected Microsoft SQL Server database.' }],
+      ['microsoft_sql_customer_database', 'database_connection', 1780, 620, { database_type: 'microsoft_sql_connection', connection_string: '${SECRET:MICROSOFT_SQL_CONNECTION_STRING}', connection_timeout_seconds: 30, encrypt_connection: true, trust_server_certificate: false, read_only: true }],
+    ].map(([id, nodeType, x, y, config]) => ({
+      id,
+      type: 'workflowNode',
+      position: { x, y },
+      data: {
+        label: nodeTemplates[nodeType]?.displayName || nodeType,
+        nodeType,
+        config,
+      },
+    }));
 
-          if (funcNode.data.nodeType === 'CustomFunction') {
-            const params = funcNode.data.params || {};
-            const funcName = params.functionName || 'myFunction';
-            const funcParams = params.functionParams || '';
-            functionWrapper = `async function ${funcName}(${funcParams}) { {{USER_CODE}} }`;
-          } else {
-            functionWrapper = template.functionTemplate;
-          }
+    const exampleEdges = [
+      ['memory_runtime_context', 'voice_agent_support'],
+      ['schedule_weekly_call', 'voice_agent_support'],
+      ['summarizer_call_notes', 'voice_agent_support'],
+      ['kb_nbp_docs', 'voice_agent_support'],
+      ['voice_agent_support', 'tool_call_kb_lookup'],
+      ['tool_call_kb_lookup', 'kb_nbp_docs'],
+      ['voice_agent_support', 'message_out_of_scope'],
+      ['webhook_inbound_trigger', 'voice_agent_support'],
+      ['voice_agent_support', 'db_logs_call_record'],
+      ['voice_agent_support', 'llm_custom_processing'],
+      ['llm_custom_processing', 'tool_call_kb_lookup'],
+      ['tool_call_kb_lookup', 'end_call_when_resolved'],
+      ['whatsapp_trigger_customer_message', 'voice_agent_support'],
+      ['voice_agent_support', 'messaging_whatsapp_reply'],
+      ['sms_trigger_customer_message', 'voice_agent_support'],
+      ['voice_agent_support', 'messaging_sms_reply'],
+      ['slack_trigger_support_message', 'voice_agent_support'],
+      ['voice_agent_support', 'messaging_slack_update'],
+      ['email_trigger_support_request', 'voice_agent_support'],
+      ['voice_agent_support', 'messaging_email_reply'],
+      ['voice_agent_support', 'tool_call_mysql_lookup'],
+      ['tool_call_mysql_lookup', 'mysql_customer_database'],
+      ['voice_agent_support', 'tool_call_postgresql_lookup'],
+      ['tool_call_postgresql_lookup', 'postgresql_customer_database'],
+      ['voice_agent_support', 'tool_call_microsoft_sql_lookup'],
+      ['tool_call_microsoft_sql_lookup', 'microsoft_sql_customer_database'],
+    ].map(([source, target], index) => ({
+      id: makeEdgeId(source, target, index + 1),
+      source,
+      target,
+      type: 'editableEdge',
+      markerEnd: { type: MarkerType.ArrowClosed },
+      data: {},
+    }));
 
-          if (funcNode.data?.params) {
-            Object.entries(funcNode.data.params).forEach(([key, value]) => {
-              const placeholder = new RegExp(`{{${key}}}`, 'g');
-              functionWrapper = functionWrapper.replace(placeholder, value);
-            });
-          }
+    setWorkflowMeta({
+      schema_version: '0.1',
+      workflow_id: 'dummy_complete_voice_workflow',
+      name: 'Complete Dummy Voice Workflow With Messaging Nodes',
+      phone_number: '03330330703',
+    });
+    setNodes(exampleNodes);
+    setEdges(exampleEdges);
+    window.setTimeout(() => reactFlowInstance?.fitView({ padding: 0.2, duration: 500 }), 100);
+  }, [edges.length, nodes.length, pushHistory, reactFlowInstance, setEdges, setNodes]);
 
-          const internalCode = generateInternalFlow(
-            funcNode.data.userNodes,
-            funcNode.data.userEdges
-          );
-          functionDefinitions += functionWrapper.replace('{{USER_CODE}}', internalCode) + '\n';
-        });
+  const onResizeRightPanelStart = (event) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = rightPanelWidth;
 
-        // 5. GENERATE MAIN FLOW (Traverse valid nodes)
-        const visitedNodes = new Set();
-        let currentNode = startNode;
+    const onMove = (moveEvent) => {
+      const delta = startX - moveEvent.clientX;
+      const nextWidth = Math.min(620, Math.max(320, startWidth + delta));
+      setRightPanelWidth(nextWidth);
+    };
 
-        // We use validNodes in our lookups to be safe, though following edges is usually enough
-        while (currentNode && !visitedNodes.has(currentNode.id)) {
-          visitedNodes.add(currentNode.id);
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
 
-          const nodeType = currentNode.data.nodeType;
-          const template = allNodeTemplates[nodeType];
-
-          if (template) {
-            let nodeCode = '';
-
-            if (nodeType === 'HandleTransaction') {
-              let wrapper = template.functionTemplate;
-              const internalCode = generateInternalFlow(
-                currentNode.data.userNodes,
-                currentNode.data.userEdges
-              );
-              nodeCode = wrapper.replace('{{USER_CODE}}', internalCode);
-            }
-            else if (nodeType === 'CustomFunction') {
-              const params = currentNode.data.params || {};
-              const funcName = params.functionName || 'myFunction';
-              const funcArgs = params.functionArgs || '';
-              const resultVar = params.resultVar || '';
-              if (resultVar) {
-                nodeCode = `const ${resultVar} = await ${funcName}(${funcArgs});`;
-              } else {
-                nodeCode = `await ${funcName}(${funcArgs});`;
-              }
-            }
-            else if (nodeType === 'If') {
-              nodeCode = template.codeTemplate;
-              const trueBranchEdge = edges.find(edge => edge.source === currentNode.id);
-
-              if (trueBranchEdge) {
-                // Pass validNodes to generateBranchCode to ensure consistency
-                const trueBranchCode = generateBranchCode(trueBranchEdge.target, validNodes, edges, visitedNodes);
-                nodeCode = nodeCode.replace(/\{\{\s*TRUE_BRANCH\s*\}\}/, trueBranchCode);
-              } else {
-                nodeCode = nodeCode.replace(/\{\{\s*TRUE_BRANCH\s*\}\}/, '  // True branch\n');
-              }
-            }
-            else if (template.isExtensible) {
-              nodeCode = template.mainFlowTemplate;
-            }
-            else {
-              nodeCode = template.codeTemplate;
-            }
-
-            if (nodeCode) {
-              if (currentNode.data?.params) {
-                Object.entries(currentNode.data.params).forEach(([key, value]) => {
-                  const placeholder = new RegExp(`{{${key}}}`, 'g');
-                  nodeCode = nodeCode.replace(placeholder, value);
-                });
-              }
-              if (template.inputs) {
-                template.inputs.forEach(input => {
-                  const placeholder = new RegExp(`{{${input.key}}}`, 'g');
-                  nodeCode = nodeCode.replace(placeholder, input.defaultValue);
-                });
-              }
-              mainFlowCode += nodeCode + '\n';
-            }
-          }
-
-          const outgoingEdge = edges.find(edge => edge.source === currentNode.id);
-          if (outgoingEdge) {
-            currentNode = validNodes.find(node => node.id === outgoingEdge.target);
-          } else {
-            currentNode = null;
-          }
-        }
-
-        const finalCode = functionDefinitions + mainFlowCode;
-        setView('ts');
-        setGeneratedCode(finalCode);
-
-      } catch (err) {
-        console.error('Code generation error:', err);
-        alert(`Error generating code: ${err.message} `);
-      } finally {
-        setIsLoading(false);
-      }
-    }, 100);
-  }, [nodes, edges, allNodeTemplates, generateInternalFlow, generateBranchCode]);
-  const stopAnimation = () => {
-    console.log("STOP command received.");
-    if (animationTimeoutRef.current) {
-      clearTimeout(animationTimeoutRef.current);
-    }
-    setIsAnimationModalOpen(false);
-    setAnimatingNode(null);
-    setIsPlaying(false);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   };
 
-  const handleModalAnimationDone = useCallback((nodeId) => {
-    console.log(`Modal animation for ${nodeId} finished.`);
-    setIsAnimationModalOpen(false);
-    setAnimatingNode(null);
-
-    const node = nodesRef.current.find(n => n.id === nodeId);
-    if (!node) return;
-
-    const closingCode = generateNodeCode(node, allNodeTemplates, 'end');
-    setGeneratedCode(prevCode => prevCode + closingCode + '\n\n');
-
-    const callCode = generateNodeCode(node, allNodeTemplates, 'all');
-    if (callCode) {
-      setGeneratedCode(prevCode => prevCode + callCode + '\n');
-    }
-
-    const outgoingEdge = edgesRef.current.find(e => e.source === nodeId);
-    if (outgoingEdge) {
-      const nextNode = nodesRef.current.find(n => n.id === outgoingEdge.target);
-      if (nextNode) {
-        console.log("Resuming main flow animation at:", nextNode.id);
-        playFlowAnimation(nextNode.id);
-        return;
-      }
-    }
-
-    console.log("Main flow animation finished after modal.");
-    setIsPlaying(false);
-    setNodes(nds => nds.map(n => ({ ...n, selected: false })));
-    setEdges(eds => eds.map(e => ({ ...e, selected: false })));
-
-  }, [allNodeTemplates]);
-
-  const playFlowAnimation = useCallback((startNodeId) => {
-    // 1. Clear previous timeouts
-    if (animationTimeoutRef.current) {
-      clearTimeout(animationTimeoutRef.current);
-    }
-
-    // 2. Reset Debugger State & Ref
-    setDebugVariables({});
-    setDebugLogs([]);
-    flowVarsRef.current = {}; // <--- Reset the ref
-
-    // 3. Determine Start Node
-    let startNode;
-    if (startNodeId) {
-      startNode = nodesRef.current.find(n => n.id === startNodeId);
-    } else {
-      console.log("--- ANIMATION START ---");
-      startNode = nodesRef.current.find(n => n.data.nodeType === 'Start');
-      
-      if (startNode) {
-        setIsPlaying(true);
-        setView('debug'); // Switch to debug view
-
-        // --- GENERATE FUNCTION DEFINITIONS ---
-        let initialCode = "// --- Function Definitions ---\n";
-        const functionNodes = nodesRef.current.filter(n => 
-            n.data.nodeType === 'CustomFunction' || 
-            (allNodeTemplates[n.data.nodeType]?.isExtensible)
-        );
-
-        functionNodes.forEach(funcNode => {
-             const template = allNodeTemplates[funcNode.data.nodeType];
-             if(!template) return;
-             let functionWrapper = '';
-             if (funcNode.data.nodeType === 'CustomFunction') {
-                const params = funcNode.data.params || {};
-                const funcName = params.functionName || 'myFunction';
-                const funcParams = params.functionParams || '';
-                functionWrapper = `function ${funcName}(${funcParams}) {\n  // Custom Logic...\n  return ...;\n}`;
-             } else {
-                functionWrapper = template.functionTemplate || '';
-             }
-             initialCode += functionWrapper + "\n\n";
-        });
-
-        initialCode += "// --- Main Flow ---\n// --- Animation Started ---\n\n";
-        setGeneratedCode(initialCode);
-        
-        setNodes(nds => nds.map(n => ({ ...n, selected: false })));
-        setEdges(eds => eds.map(e => ({ ...e, selected: false })));
-      }
-    }
-
-    if (!startNode) {
-      if (!startNodeId) alert("No 'Start' node found to begin animation.");
-      setIsPlaying(false);
-      return;
-    }
-
-    // 4. Define the Animation Step Logic
-    const animateStep = (nodeId, onDone) => {
-      const currentNodes = nodesRef.current;
-      const currentEdges = edgesRef.current;
-
-      const node = currentNodes.find(n => n.id === nodeId);
-      if (!node) {
-        if (onDone) onDone();
-        return;
-      }
-
-      // --- SIMULATE LOGIC (FIXED) ---
-      // 1. Run simulation using the Ref (Synchronous)
-      const { newVariables, logMessage, error } = simulateNodeExecution(node, flowVarsRef.current);
-      
-      // 2. Update the Ref for the next step
-      flowVarsRef.current = newVariables;
-
-      // 3. Update the UI (Debugger Panel)
-      setDebugVariables({ ...newVariables }); // Copy to trigger re-render
-
-      if (logMessage) {
-        setDebugLogs(prevLogs => [...prevLogs, {
-          time: new Date().toLocaleTimeString().split(' ')[0],
-          message: logMessage,
-          type: error ? 'error' : 'info'
-        }]);
-      }
-      // -------------------------------
-
-      console.log(`Animating step for main node: ${nodeId}`);
-      setNodes(nds => nds.map(n => ({ ...n, selected: n.id === nodeId })));
-      setEdges(eds => eds.map(e => ({ ...e, selected: false })));
-
-      const isExtensible = allNodeTemplates[node.data.nodeType]?.isExtensible;
-      const hasCustomLogic = node.data.userNodes && node.data.userNodes.length > 0;
-      const isIf = node.data.nodeType === 'If';
-
-      const proceedToNext = () => {
-        const outgoingEdge = currentEdges.find(e => e.source === nodeId);
-        if (!outgoingEdge) {
-          if (onDone) onDone();
-          return;
-        }
-
-        animationTimeoutRef.current = setTimeout(() => {
-          setEdges(eds => eds.map(e => ({ ...e, selected: e.id === outgoingEdge.id })));
-          setNodes(nds => nds.map(n => ({ ...n, selected: false })));
-
-          const nextNode = currentNodes.find(n => n.id === outgoingEdge.target);
-          if (nextNode) {
-            setTimeout(() => {
-              animateStep(nextNode.id, onDone);
-            }, 800);
-          } else {
-            if (onDone) onDone();
-          }
-        }, 800);
-      };
-
-      if (isExtensible && hasCustomLogic) {
-        const startCode = generateNodeCode(node, allNodeTemplates, 'start');
-        setGeneratedCode(prevCode => prevCode + startCode + '\n');
-        resumeCallbackRef.current = proceedToNext;
-        animationTimeoutRef.current = setTimeout(() => {
-          setAnimatingNode(node);
-          setIsAnimationModalOpen(true);
-        }, 800);
-
-      } else if (isIf) {
-        const startCode = generateNodeCode(node, allNodeTemplates, 'start');
-        setGeneratedCode(prevCode => prevCode + startCode + '\n');
-
-        const trueEdge = currentEdges.find(e => e.source === nodeId);
-        if (trueEdge) {
-          animationTimeoutRef.current = setTimeout(() => {
-            setEdges(eds => eds.map(e => ({ ...e, selected: e.id === trueEdge.id })));
-            setNodes(nds => nds.map(n => ({ ...n, selected: false })));
-
-            const nextNode = currentNodes.find(n => n.id === trueEdge.target);
-            if (nextNode) {
-              setTimeout(() => {
-                animateStep(nextNode.id, () => {
-                  setGeneratedCode(prev => prev + '}\n');
-                  if (onDone) onDone();
-                });
-              }, 800);
-            } else {
-              setGeneratedCode(prev => prev + '}\n');
-              if (onDone) onDone();
-            }
-          }, 800);
-          return;
-        } else {
-          setGeneratedCode(prev => prev + '}\n');
-          proceedToNext();
-        }
-
-      } else {
-        const code = generateNodeCode(node, allNodeTemplates, 'all');
-        setGeneratedCode(prevCode => prevCode + code + '\n');
-        proceedToNext();
-      }
-    };
-
-    animateStep(startNode.id, () => {
-      console.log("Animation Complete.");
-      setIsPlaying(false);
-      setNodes(nds => nds.map(n => ({ ...n, selected: false })));
-      setEdges(eds => eds.map(e => ({ ...e, selected: false })));
-    });
-
-  }, [allNodeTemplates]);
-
-  const handleDownload = useCallback(() => {
-    if (!generatedCode) return;
-    const blob = new Blob([generatedCode], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'flowchart.ts';
-    link.click();
-    URL.revokeObjectURL(url);
-  }, [generatedCode]);
-
   return (
-    <div className="h-screen flex">
-      <Sidebar />
-      <div className="flex-1 p-4">
-        <div className="h-full border rounded-lg overflow-hidden flex flex-col">
-          {/* --- TOP TOOLBAR --- */}
-          <div className="flex items-center justify-between p-3 border-b">
-            <h2 className="text-lg font-semibold">Rule Builder</h2>
-            <div className="flex items-center gap-2">
-              {!isPlaying ? (
-                <button
-                  className="px-3 py-1 rounded text-white transition-colors bg-blue-600 hover:bg-blue-700 flex items-center gap-1"
-                  onClick={() => playFlowAnimation(null)}
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
-                    <path d="M10.804 8 5 4.633v6.734zM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8m15 0A7 7 0 1 0 1 8a7 7 0 0 0 14 0" />
-                  </svg>
-                  Play
-                </button>
-              ) : (
-                <button
-                  className="px-3 py-1 rounded text-white transition-colors bg-red-600 hover:bg-red-700 flex items-center gap-1"
-                  onClick={stopAnimation}
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
-                    <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8m15 0A7 7 0 1 0 1 8a7 7 0 0 0 14 0M5 5.5A1.5 1.5 0 0 1 6.5 4h3A1.5 1.5 0 0 1 11 5.5v5A1.5 1.5 0 0 1 9.5 12h-3A1.5 1.5 0 0 1 5 10.5z" />
-                  </svg>
-                  Stop
-                </button>
-              )}
-
-              <button
-                className="px-3 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
-                onClick={displayJson}
-                disabled={isPlaying}
-              >
-                Display JSON
-              </button>
-              <button
-                className="px-3 py-1 rounded bg-green-600 text-white hover:bg-green-700"
-                onClick={handleDownload}
-                disabled={isPlaying}
-              >
-                Download TS
-              </button>
-              <button
-                className="px-3 py-1 rounded bg-purple-600 text-white hover:bg-purple-700"
-                onClick={generateTypescriptFromFlow}
-                disabled={isPlaying}
-              >
-                Generate TypeScript
-              </button>
-            </div>
+    <div className="h-screen w-screen flex flex-col bg-gray-100 text-gray-900 overflow-hidden">
+      <header className="h-14 shrink-0 border-b border-slate-200 bg-white flex items-center px-3 gap-1">
+        <div className="flex items-center gap-2 pr-3 mr-2 border-r border-slate-200 min-w-[210px]">
+          <div className="h-7 w-7 rounded-md bg-blue-600 text-white flex items-center justify-center font-black text-xs">
+            AI
           </div>
-
-          {/* --- MAIN CONTENT AREA --- */}
-          <div className="flex-1 relative flex overflow-hidden">
-            {isLoading && <LoadingSpinner />}
-            
-            {/* Left Side: The Canvas */}
-            <div ref={reactFlowWrapper} className="flex-1 h-full">
-              <ReactFlow
-                nodes={nodes}
-                edges={edges}
-                onInit={onInit}
-                onNodesChange={(changes) => { if (!isPlaying) { pushHistory(); setNodes((nds) => applyNodeChanges(changes, nds)); } }}
-                onEdgesChange={(changes) => { if (!isPlaying) { pushHistory(); setEdges((eds) => applyEdgeChanges(changes, eds)); } }}
-                onConnect={onConnect}
-                nodeTypes={nodeTypes}
-                edgeTypes={edgeTypes}
-                fitView
-                onDrop={onDrop}
-                onDragOver={onDragOver}
-                multiSelectionKeyCode="Shift"
-                selectionOnDrag
-                nodesDraggable={!isPlaying}
-                nodesConnectable={!isPlaying}
-                elementsSelectable={!isPlaying}
-                className="w-full h-full"
-              >
-                <Background />
-                <Controls />
-                <MiniMap />
-              </ReactFlow>
-            </div>
-
-            {/* Right Side: Debugger OR Code Preview */}
-            {/* Right Side: Tabbed Interface */}
-            <div className="w-80 border-l bg-slate-50 flex flex-col h-full">
-              
-              {/* TABS HEADER */}
-              <div className="flex items-center gap-1 p-2 border-b bg-gray-100 shrink-0">
-                <button
-                  onClick={() => setView('json')}
-                  className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-                    view === 'json' ? 'bg-blue-600 text-white shadow' : 'text-gray-600 hover:bg-gray-200'
-                  }`}
-                >
-                  JSON
-                </button>
-                <button
-                  onClick={() => setView('ts')}
-                  className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-                    view === 'ts' ? 'bg-blue-600 text-white shadow' : 'text-gray-600 hover:bg-gray-200'
-                  }`}
-                >
-                  TypeScript
-                </button>
-                <button
-                  onClick={() => setView('debug')}
-                  className={`px-3 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1 ${
-                    view === 'debug' ? 'bg-orange-500 text-white shadow' : 'text-gray-600 hover:bg-gray-200'
-                  }`}
-                >
-                  <span>🐞 Debugger</span>
-                </button>
-              </div>
-
-              {/* TAB CONTENT */}
-              <div className="flex-1 overflow-hidden relative">
-                
-                {/* VIEW 1: JSON */}
-                {view === 'json' && (
-                  <pre className="text-xs h-full overflow-auto bg-white p-2">
-                    {exportJson ? JSON.stringify(exportJson, null, 2) : 'Click "Display JSON" first.'}
-                  </pre>
-                )}
-
-                {/* VIEW 2: TYPESCRIPT */}
-                {view === 'ts' && (
-                  <pre className="text-xs h-full overflow-auto bg-white p-2">
-                    {generatedCode || 'Click "Generate TypeScript" first.'}
-                  </pre>
-                )}
-
-                {/* VIEW 3: DEBUGGER (Always rendered, just hidden via display if not active) */}
-                <div className={`h-full flex flex-col ${view === 'debug' ? 'block' : 'hidden'}`}>
-                   <DebuggerPanel 
-                      variables={debugVariables} 
-                      logs={debugLogs} 
-                      currentNodeId={animatingNode?.id} 
-                      isPlaying={isPlaying} 
-                      // Pass 'true' to force render even if not playing, so you can see results after stop
-                      alwaysVisible={true} 
-                   />
-                </div>
-
-              </div>
-            </div>
+          <div className="min-w-0">
+            <h1 className="text-[12.5px] font-bold leading-tight text-slate-900 truncate">Call Center Workflow Builder</h1>
+            <p className="text-[10px] text-slate-400 truncate">Visual configuration builder</p>
           </div>
         </div>
-      </div>
 
-      <FunctionEditorModal
-        isAnimating={isAnimationModalOpen}
-        nodeToAnimate={animatingNode}
-        onAnimationDone={handleModalAnimationDone}
-        setGeneratedCode={setGeneratedCode}
-        allNodeTemplates={allNodeTemplates}
-        isOpen={isFunctionModalOpen}
-        functionNode={editingFunction}
-        onSave={handleSaveFunction}
-        onClose={() => setIsFunctionModalOpen(false)}
-      />
+        <ToolbarGroup>
+          <ToolbarButton icon="↶" label="Undo" onClick={undo} title="Undo" />
+          <ToolbarButton icon="↷" label="Redo" onClick={redo} title="Redo" />
+          <ToolbarButton icon="⌫" label="Clear" onClick={clearWorkflow} title="Clear canvas" />
+        </ToolbarGroup>
+
+        <ToolbarGroup>
+          <ToolbarButton icon="▦" label="Example" onClick={addLatestExampleWorkflow} title="Load example workflow" />
+          <ToolbarButton icon="☑" label="Validate" onClick={showValidation} title="Validate workflow" />
+        </ToolbarGroup>
+
+        <div className="flex-1" />
+
+        <ToolbarButton icon="▶" label="Simulate" onClick={() => setSimulationOpen(true)} title="Play simulation" primary />
+      </header>
+
+      <div className="flex-1 flex min-h-0">
+        <Sidebar />
+
+        <main className="flex-1 min-w-0 flex flex-col relative">
+          {connectionError && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-red-600 text-white px-4 py-2 rounded-xl shadow-lg text-sm">
+              {connectionError}
+            </div>
+          )}
+
+          <div ref={wrapperRef} className="flex-1 min-h-0">
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              nodeTypes={nodeTypes}
+              edgeTypes={edgeTypes}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onConnect={onConnect}
+              onInit={setReactFlowInstance}
+              onDrop={onDrop}
+              onDragOver={onDragOver}
+              fitView
+              deleteKeyCode={null}
+              multiSelectionKeyCode="Shift"
+            >
+              <Background gap={20} size={1} />
+              <Controls />
+              <MiniMap pannable zoomable />
+            </ReactFlow>
+          </div>
+
+          <WorkflowActions
+            workflowJson={workflowJson}
+            onValidate={validateNow}
+            saveEndpoint={saveEndpoint}
+          />
+
+          <SimulationPanel
+            isOpen={simulationOpen}
+            onClose={() => {
+              setSimulationOpen(false);
+              highlightSimulationNode(null);
+            }}
+            nodes={nodes}
+            edges={edges}
+            onHighlight={highlightSimulationNode}
+          />
+        </main>
+
+        <div
+          onMouseDown={onResizeRightPanelStart}
+          className="w-1.5 cursor-col-resize bg-gray-200 hover:bg-blue-400 transition-colors"
+          title="Drag to resize configuration panel"
+        />
+
+        <ConfigSidebar
+          width={rightPanelWidth}
+          workflowMeta={workflowMeta}
+          onWorkflowMetaChange={updateWorkflowMeta}
+          selectedNode={selectedNode}
+          onNodeConfigChange={updateNodeConfig}
+        />
+      </div>
     </div>
   );
 }

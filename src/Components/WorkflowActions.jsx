@@ -1,0 +1,107 @@
+import React, { useState } from 'react';
+import { downloadJson } from '../utils/workflowCompiler';
+
+export default function WorkflowActions({ workflowJson, onValidate, saveEndpoint }) {
+  const [status, setStatus] = useState('');
+  const [showJson, setShowJson] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const filename = `${workflowJson.workflow_id || 'workflow'}.json`;
+
+  const copyJson = async () => {
+    await navigator.clipboard.writeText(JSON.stringify(workflowJson, null, 2));
+    setStatus('JSON copied to clipboard.');
+  };
+
+  const download = () => {
+    downloadJson(filename, workflowJson);
+    setStatus('JSON downloaded.');
+  };
+
+  const generateAndSave = async () => {
+    const result = onValidate?.();
+    if (result && result.errors.length > 0) {
+      setStatus(`Cannot save. Fix ${result.errors.length} validation issue(s).`);
+      return;
+    }
+
+    if (!saveEndpoint) {
+      console.log('Generated workflow JSON:', workflowJson);
+      setShowJson(true);
+      setStatus('Generated JSON locally. Add VITE_WORKFLOW_SAVE_API to enable API save.');
+      return;
+    }
+
+    setSaving(true);
+    setStatus('Saving workflow...');
+    try {
+      const response = await fetch(saveEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(workflowJson),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Save failed: ${response.status}`);
+      }
+
+      setStatus('Workflow saved successfully.');
+    } catch (error) {
+      setStatus(error.message || 'Save failed.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="border-t bg-white">
+      <div className="px-4 py-3 flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-gray-900">Workflow Output</div>
+          <div className="text-xs text-gray-500 truncate">
+            Live preview is hidden. Use copy, download, or generate/save when needed.
+          </div>
+          {status && <div className="text-xs text-blue-700 mt-1">{status}</div>}
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowJson((value) => !value)}
+            className="px-3 py-2 text-sm rounded-lg border bg-white hover:bg-gray-50"
+          >
+            {showJson ? 'Hide JSON' : 'View JSON'}
+          </button>
+          <button
+            type="button"
+            onClick={copyJson}
+            className="px-3 py-2 text-sm rounded-lg border bg-white hover:bg-gray-50"
+          >
+            Copy
+          </button>
+          <button
+            type="button"
+            onClick={download}
+            className="px-3 py-2 text-sm rounded-lg border bg-white hover:bg-gray-50"
+          >
+            Download
+          </button>
+          <button
+            type="button"
+            onClick={generateAndSave}
+            disabled={saving}
+            className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+          >
+            {saving ? 'Saving...' : 'Generate / Save'}
+          </button>
+        </div>
+      </div>
+
+      {showJson && (
+        <pre className="mx-4 mb-4 max-h-[260px] overflow-auto rounded-xl bg-gray-950 text-gray-100 text-xs p-4">
+          {JSON.stringify(workflowJson, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
