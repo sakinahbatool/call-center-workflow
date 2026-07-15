@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { downloadJson } from '../utils/workflowCompiler';
+import { uploadWorkflowJson } from '../utils/apiClient';
 
 export default function WorkflowActions({ workflowJson, onValidate, saveEndpoint }) {
   const [status, setStatus] = useState('');
@@ -25,29 +26,18 @@ export default function WorkflowActions({ workflowJson, onValidate, saveEndpoint
       return;
     }
 
-    if (!saveEndpoint) {
-      console.log('Generated workflow JSON:', workflowJson);
-      setShowJson(true);
-      setStatus('Generated JSON locally. Add VITE_WORKFLOW_SAVE_API to enable API save.');
-      return;
-    }
-
     setSaving(true);
-    setStatus('Saving workflow...');
+    setStatus('Uploading workflow JSON...');
     try {
-      const response = await fetch(saveEndpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(workflowJson),
+      await uploadWorkflowJson({
+        workflowId: workflowJson.workflow_id,
+        workflowJson,
+        endpoint: saveEndpoint,
       });
 
-      if (!response.ok) {
-        throw new Error(`Save failed: ${response.status}`);
-      }
-
-      setStatus('Workflow saved successfully.');
+      setStatus('Workflow JSON uploaded successfully.');
     } catch (error) {
-      setStatus(error.message || 'Save failed.');
+      setStatus(error.message || 'JSON upload failed.');
     } finally {
       setSaving(false);
     }

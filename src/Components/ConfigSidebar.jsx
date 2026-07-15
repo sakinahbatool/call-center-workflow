@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import nodeTemplates, { getNodeFields, getSubtypeDisplay } from '../utils/nodeTemplates';
 import { getByPath } from '../utils/objectPath';
+import { uploadDocument } from '../utils/apiClient';
 
 function FieldLabel({ field }) {
   return (
@@ -56,19 +57,48 @@ function JsonObjectInput({ value, onChange }) {
   );
 }
 
-function FileArrayInput({ value, onChange }) {
+function FileArrayInput({ value, onChange, workflowId }) {
   const files = Array.isArray(value) ? value : [];
+  const [uploadStatus, setUploadStatus] = useState('');
 
-  const handleFiles = (event) => {
+  const handleFiles = async (event) => {
     const selected = Array.from(event.target.files || []);
-    const mapped = selected.map((file, index) => ({
-      id: `file_${Date.now()}_${index}`,
-      path: file.name,
-      metadata: {
-        title: file.name,
-      },
-    }));
-    onChange([...files, ...mapped]);
+    if (selected.length === 0) return;
+
+    setUploadStatus(`Uploading ${selected.length} file(s)...`);
+
+    const uploadedFiles = [];
+    const failedFiles = [];
+
+    for (const [index, file] of selected.entries()) {
+      try {
+        await uploadDocument({
+          workflowId,
+          file,
+        });
+
+        uploadedFiles.push({
+          id: `file_${Date.now()}_${index}`,
+          path: file.name,
+          metadata: {
+            title: file.name,
+          },
+        });
+      } catch (error) {
+        failedFiles.push(`${file.name}: ${error.message || 'upload failed'}`);
+      }
+    }
+
+    if (uploadedFiles.length > 0) {
+      onChange([...files, ...uploadedFiles]);
+    }
+
+    if (failedFiles.length > 0) {
+      setUploadStatus(`Uploaded ${uploadedFiles.length} file(s). Failed: ${failedFiles.join('; ')}`);
+    } else {
+      setUploadStatus(`Uploaded ${uploadedFiles.length} file(s) successfully.`);
+    }
+
     event.target.value = '';
   };
 
@@ -85,7 +115,7 @@ function FileArrayInput({ value, onChange }) {
         className="w-full text-sm border rounded-lg px-3 py-2 bg-white"
       />
       <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
-        Prototype note: this stores file metadata only. Actual file upload/storage requires backend API.
+Files are uploaded to the document API. The workflow JSON stores file metadata only.
       </p>
       <div className="space-y-2">
         {files.map((file) => (
@@ -108,7 +138,7 @@ function FileArrayInput({ value, onChange }) {
   );
 }
 
-function ConfigField({ field, value, onChange }) {
+function ConfigField({ field, value, onChange, workflowId }) {
   if (field.type === 'boolean') {
     return (
       <label className="flex items-center gap-2 text-sm text-gray-700">
@@ -184,7 +214,7 @@ function ConfigField({ field, value, onChange }) {
       )}
 
       {field.type === 'fileArray' && (
-        <FileArrayInput value={value} onChange={onChange} />
+        <FileArrayInput value={value} onChange={onChange} workflowId={workflowId} />
       )}
 
       {(!field.type || field.type === 'text') && (
@@ -212,6 +242,8 @@ export default function ConfigSidebar({ width, workflowMeta, onWorkflowMetaChang
     { key: 'schema_version', label: 'Schema Version' },
     { key: 'workflow_id', label: 'Workflow ID' },
     { key: 'name', label: 'Workflow Name' },
+    { key: 'company_name', label: 'Company Name' },
+    { key: 'company_description', label: 'Company Description' },
     { key: 'phone_number', label: 'Phone Number' },
   ], []);
 
@@ -271,6 +303,7 @@ export default function ConfigSidebar({ width, workflowMeta, onWorkflowMetaChang
                     field={field}
                     value={getByPath(selectedNode.data.config, field.key)}
                     onChange={(value) => onNodeConfigChange(selectedNode.id, field.key, value)}
+                    workflowId={workflowMeta.workflow_id}
                   />
                 ))}
               </div>

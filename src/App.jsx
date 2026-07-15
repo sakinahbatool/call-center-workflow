@@ -1,13 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactFlow, {
-  addEdge,
-  Background,
-  Controls,
-  MiniMap,
-  MarkerType,
-  getConnectedEdges,
-  useEdgesState,
-  useNodesState,
+  addEdge, Background, Controls, MiniMap, MarkerType, getConnectedEdges, useEdgesState, useNodesState,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 
@@ -21,7 +14,7 @@ import SimulationPanel from './Components/SimulationPanel';
 import nodeTemplates, { getNodeFields } from './utils/nodeTemplates';
 import { compileWorkflow, DEFAULT_WORKFLOW_META } from './utils/workflowCompiler';
 import { getByPath, isEmptyValue, setByPath } from './utils/objectPath';
-import { getConnectionError, isConnectionAllowed } from './utils/connectionRules';
+import { DB_CONNECTION_NODE_TYPES, TRIGGER_NODE_TYPES, getConnectionError, isConnectionAllowed } from './utils/connectionRules';
 
 const nodeTypes = { workflowNode: EditableNode };
 const edgeTypes = { editableEdge: EditableEdge };
@@ -30,44 +23,285 @@ function clone(value) {
   if (typeof structuredClone === 'function') return structuredClone(value);
   return JSON.parse(JSON.stringify(value));
 }
+function makeEdgeId(source, target, index) { return `edge_${index}_${source}_${target}`; }
+function getNodeNumber(nodes, type) { return nodes.filter((n) => n.data?.nodeType === type).length + 1; }
+function getNextEdgeNumber(edges) { return edges.length + 1; }
 
-function makeEdgeId(source, target, index) {
-  return `edge_${index}_${source}_${target}`;
-}
+const LATEST_EXAMPLE_WORKFLOW = {
+  "schema_version": "0.5",
+  "workflow_id": "new_end_agent_workflow",
+  "name": "New End-Agent Workflow",
+  "company_name": "",
+  "company_description": "",
+  "nodes": [
+    {
+      "id": "call_trigger_1",
+      "type": "call_trigger",
+      "config": {
+        "from": "",
+        "to": "",
+        "purpose": ""
+      }
+    },
+    {
+      "id": "voice_agent_start_1",
+      "type": "voice_agent_start",
+      "config": {
+        "voice_agent_name": "",
+        "agent_gender": "",
+        "voice_id": "",
+        "language": "en-PK",
+        "speaking_speed": 1
+      }
+    },
+    {
+      "id": "initial_message_1",
+      "type": "initial_message",
+      "config": {
+        "message": ""
+      }
+    },
+    {
+      "id": "memory_1",
+      "type": "memory",
+      "config": {
+        "use_memory": true,
+        "context_last_messages": 8,
+        "save_conversation_history": true
+      }
+    },
+    {
+      "id": "agent_1",
+      "type": "agent",
+      "config": {
+        "prompt": "",
+        "purpose": "",
+        "dos": [],
+        "donts": []
+      }
+    },
+    {
+      "id": "tool_call_1",
+      "type": "tool_call",
+      "config": {
+        "condition": ""
+      }
+    },
+    {
+      "id": "db_query_1",
+      "type": "db_query",
+      "config": {
+        "operation": "verify",
+        "query": "",
+        "parameters": {}
+      }
+    },
+    {
+      "id": "postgresql_connection_1",
+      "type": "postgresql_connection",
+      "config": {
+        "connection_string": "${SECRET:POSTGRESQL_CONNECTION_STRING}",
+        "connection_timeout_seconds": 30,
+        "ssl_enabled": true,
+        "read_only": true
+      }
+    },
+    {
+      "id": "if_condition_1",
+      "type": "if_condition",
+      "config": {
+        "left_value": "{{db_query_1.account_status}}",
+        "operator": "equals",
+        "right_value": "active"
+      }
+    },
+    {
+      "id": "message_1",
+      "type": "message",
+      "config": {
+        "condition": "",
+        "message": ""
+      }
+    },
+    {
+      "id": "last_message_1",
+      "type": "last_message",
+      "config": {
+        "message": ""
+      }
+    },
+    {
+      "id": "end_call_1",
+      "type": "end_call",
+      "config": {
+        "condition": ""
+      }
+    },
+    {
+      "id": "transcription_1",
+      "type": "transcription",
+      "config": {
+        "instruction": ""
+      }
+    },
+    {
+      "id": "summarizer_1",
+      "type": "summarizer",
+      "config": {
+        "instruction": ""
+      }
+    },
+    {
+      "id": "db_logs_1",
+      "type": "db_logs",
+      "config": {
+        "save_fields": {
+          "call_from": true,
+          "call_to": true,
+          "call_transcription": true,
+          "call_summary": true,
+          "call_time_and_date": true,
+          "call_status": true
+        }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "id": "edge_1_call_trigger_1_voice_agent_start_1",
+      "from_node_id": "call_trigger_1",
+      "to_node_id": "voice_agent_start_1"
+    },
+    {
+      "id": "edge_2_voice_agent_start_1_initial_message_1",
+      "from_node_id": "voice_agent_start_1",
+      "to_node_id": "initial_message_1"
+    },
+    {
+      "id": "edge_3_initial_message_1_memory_1",
+      "from_node_id": "initial_message_1",
+      "to_node_id": "memory_1"
+    },
+    {
+      "id": "edge_4_memory_1_agent_1",
+      "from_node_id": "memory_1",
+      "to_node_id": "agent_1"
+    },
+    {
+      "id": "edge_5_agent_1_tool_call_1",
+      "from_node_id": "agent_1",
+      "to_node_id": "tool_call_1"
+    },
+    {
+      "id": "edge_6_agent_1_message_1",
+      "from_node_id": "agent_1",
+      "to_node_id": "message_1"
+    },
+    {
+      "id": "edge_7_tool_call_1_db_query_1",
+      "from_node_id": "tool_call_1",
+      "to_node_id": "db_query_1"
+    },
+    {
+      "id": "edge_8_db_query_1_postgresql_connection_1",
+      "from_node_id": "db_query_1",
+      "to_node_id": "postgresql_connection_1"
+    },
+    {
+      "id": "edge_9_db_query_1_if_condition_1",
+      "from_node_id": "db_query_1",
+      "to_node_id": "if_condition_1"
+    },
+    {
+      "id": "edge_10_if_condition_1_message_1_true",
+      "from_node_id": "if_condition_1",
+      "to_node_id": "message_1",
+      "branch": "true"
+    },
+    {
+      "id": "edge_11_if_condition_1_last_message_1_false",
+      "from_node_id": "if_condition_1",
+      "to_node_id": "last_message_1",
+      "branch": "false"
+    },
+    {
+      "id": "edge_12_message_1_last_message_1",
+      "from_node_id": "message_1",
+      "to_node_id": "last_message_1"
+    },
+    {
+      "id": "edge_13_last_message_1_end_call_1",
+      "from_node_id": "last_message_1",
+      "to_node_id": "end_call_1"
+    },
+    {
+      "id": "edge_14_end_call_1_transcription_1",
+      "from_node_id": "end_call_1",
+      "to_node_id": "transcription_1"
+    },
+    {
+      "id": "edge_15_transcription_1_summarizer_1",
+      "from_node_id": "transcription_1",
+      "to_node_id": "summarizer_1"
+    },
+    {
+      "id": "edge_16_summarizer_1_db_logs_1",
+      "from_node_id": "summarizer_1",
+      "to_node_id": "db_logs_1"
+    }
+  ],
+  "phone_number": ""
+};
 
-function getNodeNumber(nodes, type) {
-  const sameTypeCount = nodes.filter((node) => node.data?.nodeType === type).length;
-  return sameTypeCount + 1;
-}
+function getExampleNodePosition(node, index) {
+  const positionMap = {
+    call_trigger_inbound: { x: 80, y: 80 },
+    voice_agent_start_main: { x: 380, y: 80 },
+    initial_message_main: { x: 680, y: 80 },
+    memory_runtime_context: { x: 980, y: 80 },
+    capture_customer_identity: { x: 1280, y: 80 },
+    verify_customer_query: { x: 1580, y: 80 },
+    postgres_customer_database: { x: 1880, y: 80 },
 
-function getNextEdgeNumber(edges) {
-  return edges.length + 1;
-}
+    agent_general_support: { x: 1280, y: 320 },
+    tool_call_policy_lookup: { x: 980, y: 520 },
+    kb_nbp_docs: { x: 680, y: 520 },
+    tool_call_crm_search: { x: 1280, y: 520 },
+    crm_customer_search: { x: 1580, y: 520 },
+    fallback_general_support: { x: 1880, y: 520 },
+    end_agent_general_support: { x: 1280, y: 760 },
 
-function ToolbarGroup({ children }) {
-  return (
-    <div className="flex items-center gap-0.5 pr-3 mr-2 border-r border-slate-200 last:border-r-0 last:mr-0 last:pr-0">
-      {children}
-    </div>
-  );
-}
+    llm_prepare_handoff: { x: 380, y: 1020 },
+    handoff_db_query: { x: 680, y: 1020 },
+    crm_update_handoff: { x: 980, y: 1020 },
+    create_support_ticket: { x: 1280, y: 1020 },
+    external_api_case_enrichment: { x: 1580, y: 1020 },
+    routing_complaints: { x: 1880, y: 1020 },
+    handoff_message: { x: 680, y: 1230 },
+    handoff_whatsapp_message: { x: 980, y: 1230 },
+    handoff_if_condition: { x: 1280, y: 1230 },
+    llm_finalize_handoff: { x: 1580, y: 1230 },
 
-function ToolbarButton({ icon, label, onClick, title, primary }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      className={`h-11 min-w-[54px] px-2.5 rounded-md flex flex-col items-center justify-center gap-0.5 text-[10.5px] font-semibold leading-none transition-colors ${
-        primary
-          ? 'bg-blue-600 text-white hover:bg-blue-700'
-          : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
-      }`}
-    >
-      <span className="text-[15px] leading-none">{icon}</span>
-      <span>{label}</span>
-    </button>
-  );
+    agent_complaint_specialist: { x: 1280, y: 1500 },
+    tool_call_ticket_update: { x: 980, y: 1710 },
+    update_support_ticket: { x: 1280, y: 1710 },
+    end_agent_complaint: { x: 1580, y: 1710 },
+
+    last_message_goodbye: { x: 1280, y: 1950 },
+    end_call_complete: { x: 1280, y: 2160 },
+    transcription_complete_call: { x: 1280, y: 2370 },
+    summarizer_call_notes: { x: 1280, y: 2580 },
+    llm_post_call_classification: { x: 1280, y: 2790 },
+    db_logs_call_record: { x: 1280, y: 3000 },
+    slack_post_call_message: { x: 1280, y: 3210 },
+  };
+
+  if (positionMap[node.id]) return positionMap[node.id];
+
+  return {
+    x: 80 + (index % 4) * 300,
+    y: 80 + Math.floor(index / 4) * 220,
+  };
 }
 
 function validateWorkflowState({ workflowMeta, nodes, edges }) {
@@ -76,60 +310,89 @@ function validateWorkflowState({ workflowMeta, nodes, edges }) {
 
   if (!workflowMeta.workflow_id?.trim()) errors.push('Workflow ID is required.');
   if (!workflowMeta.name?.trim()) errors.push('Workflow name is required.');
+  if (!workflowMeta.company_name?.trim()) errors.push('Company name is required.');
+  if (!workflowMeta.company_description?.trim()) errors.push('Company description is required.');
   if (!workflowMeta.phone_number?.trim()) warnings.push('Phone number is empty.');
 
   nodes.forEach((node) => {
     const template = nodeTemplates[node.data?.nodeType];
-    if (!template) {
-      errors.push(`${node.id}: unknown node type.`);
-      return;
-    }
-
+    if (!template) { errors.push(`${node.id}: unknown node type.`); return; }
     getNodeFields(node.data?.nodeType, node.data?.config || {}).forEach((field) => {
       if (!field.required) return;
-      const value = getByPath(node.data?.config || {}, field.key);
-      if (isEmptyValue(value)) errors.push(`${node.id}: ${field.label} is required.`);
+      if (isEmptyValue(getByPath(node.data?.config || {}, field.key))) errors.push(`${node.id}: ${field.label} is required.`);
     });
   });
 
   edges.forEach((edge) => {
-    const source = nodes.find((node) => node.id === edge.source);
-    const target = nodes.find((node) => node.id === edge.target);
-    if (!source || !target) {
-      errors.push(`${edge.id}: source or target node is missing.`);
-      return;
-    }
-
-    const allowed = isConnectionAllowed(source.data?.nodeType, target.data?.nodeType);
-    if (!allowed) {
+    const source = nodes.find((n) => n.id === edge.source);
+    const target = nodes.find((n) => n.id === edge.target);
+    if (!source || !target) { errors.push(`${edge.id}: source or target node missing.`); return; }
+    if (!isConnectionAllowed(source.data?.nodeType, target.data?.nodeType)) {
       errors.push(`${edge.id}: ${getConnectionError(source.data?.nodeType, target.data?.nodeType)}`);
     }
   });
 
-  const hasTrigger = nodes.some((node) => [
-    'webhook',
-    'schedule',
-    'whatsapp_trigger',
-    'sms_trigger',
-    'slack_trigger',
-    'email_trigger',
-  ].includes(node.data?.nodeType));
+  const voiceAgentStartCount = nodes.filter((n) => n.data?.nodeType === 'voice_agent_start').length;
+  if (voiceAgentStartCount === 0) errors.push('One voice_agent_start node is required.');
+  if (voiceAgentStartCount > 1) errors.push('Only one voice_agent_start node is allowed in a live-call workflow.');
 
-  if (!hasTrigger) warnings.push('No trigger node found. Add webhook, schedule, WhatsApp, SMS, Slack, or email trigger.');
-  if (!nodes.some((node) => node.data?.nodeType === 'voice_agent')) errors.push('At least one voice_agent node is required.');
+  if (!nodes.some((n) => TRIGGER_NODE_TYPES.includes(n.data?.nodeType))) warnings.push('No trigger node found.');
+  if (!nodes.some((n) => n.data?.nodeType === 'agent')) errors.push('At least one agent node is required.');
+  if (!nodes.some((n) => n.data?.nodeType === 'end_call')) warnings.push('No end_call node found.');
   if (edges.length === 0) warnings.push('No connections found.');
 
-  nodes
-    .filter((node) => node.data?.nodeType === 'webhook')
-    .forEach((node) => {
-      const targetId = node.data?.config?.voice_agent_to_activate;
-      if (targetId && !nodes.some((item) => item.id === targetId && item.data?.nodeType === 'voice_agent')) {
-        errors.push(`${node.id}: voice_agent_to_activate must match an existing voice_agent node ID.`);
+  nodes.filter((n) => n.data?.nodeType === 'db_query').forEach((node) => {
+    const dbTargets = edges
+      .filter((edge) => edge.source === node.id)
+      .map((edge) => nodes.find((item) => item.id === edge.target))
+      .filter((target) => DB_CONNECTION_NODE_TYPES.includes(target?.data?.nodeType));
+
+    if (dbTargets.length !== 1) {
+      errors.push(`${node.id}: db_query must connect to exactly one database connection node.`);
+    }
+  });
+
+  nodes.filter((n) => n.data?.nodeType === 'if_condition').forEach((node) => {
+    const outgoing = edges.filter((edge) => edge.source === node.id);
+    const branches = outgoing.map((edge) => edge.data?.branch || edge.sourceHandle).filter(Boolean);
+
+    outgoing.forEach((edge) => {
+      const branch = edge.data?.branch || edge.sourceHandle;
+      if (!['true', 'false'].includes(branch)) {
+        errors.push(`${edge.id}: if_condition outgoing connection must use TRUE or FALSE branch handle.`);
       }
     });
 
+    if (branches.filter((branch) => branch === 'true').length > 1) {
+      errors.push(`${node.id}: if_condition can only have one TRUE branch.`);
+    }
+
+    if (branches.filter((branch) => branch === 'false').length > 1) {
+      errors.push(`${node.id}: if_condition can only have one FALSE branch.`);
+    }
+
+    if (outgoing.length > 0 && !branches.includes('true')) {
+      warnings.push(`${node.id}: if_condition has no TRUE branch.`);
+    }
+
+    if (outgoing.length > 0 && !branches.includes('false')) {
+      warnings.push(`${node.id}: if_condition has no FALSE branch.`);
+    }
+  });
+
   return { errors, warnings };
 }
+
+// Reusable Topbar Action Button Component to match the Miro style
+const TopbarButton = ({ icon, label, onClick, className = '' }) => (
+  <button 
+    onClick={onClick}
+    className={`flex flex-col items-center justify-center min-w-[56px] px-2 py-1 rounded hover:bg-slate-100 transition-colors text-slate-600 hover:text-slate-900 ${className}`}
+  >
+    <span className="text-lg leading-none mb-1">{icon}</span>
+    <span className="text-[10px] font-semibold">{label}</span>
+  </button>
+);
 
 export default function App() {
   const wrapperRef = useRef(null);
@@ -143,194 +406,133 @@ export default function App() {
 
   const historyRef = useRef([]);
   const redoRef = useRef([]);
-
   const saveEndpoint = import.meta.env.VITE_WORKFLOW_SAVE_API || '';
-
-  const selectedNode = useMemo(() => nodes.find((node) => node.selected) || null, [nodes]);
-
-  const workflowJson = useMemo(() => {
-    return compileWorkflow({ workflowMeta, nodes, edges });
-  }, [workflowMeta, nodes, edges]);
+  const selectedNode = useMemo(() => nodes.find((n) => n.selected) || null, [nodes]);
+  const workflowJson = useMemo(() => compileWorkflow({ workflowMeta, nodes, edges }), [workflowMeta, nodes, edges]);
 
   const pushHistory = useCallback(() => {
-    historyRef.current.push({
-      nodes: clone(nodes),
-      edges: clone(edges),
-      workflowMeta: clone(workflowMeta),
-    });
+    historyRef.current.push({ nodes: clone(nodes), edges: clone(edges), workflowMeta: clone(workflowMeta) });
     redoRef.current = [];
   }, [nodes, edges, workflowMeta]);
 
   const undo = useCallback(() => {
     const prev = historyRef.current.pop();
     if (!prev) return;
-
-    redoRef.current.push({
-      nodes: clone(nodes),
-      edges: clone(edges),
-      workflowMeta: clone(workflowMeta),
-    });
-
-    setNodes(prev.nodes);
-    setEdges(prev.edges);
-    setWorkflowMeta(prev.workflowMeta);
+    redoRef.current.push({ nodes: clone(nodes), edges: clone(edges), workflowMeta: clone(workflowMeta) });
+    setNodes(prev.nodes); setEdges(prev.edges); setWorkflowMeta(prev.workflowMeta);
   }, [nodes, edges, workflowMeta, setNodes, setEdges]);
 
   const redo = useCallback(() => {
     const next = redoRef.current.pop();
     if (!next) return;
-
-    historyRef.current.push({
-      nodes: clone(nodes),
-      edges: clone(edges),
-      workflowMeta: clone(workflowMeta),
-    });
-
-    setNodes(next.nodes);
-    setEdges(next.edges);
-    setWorkflowMeta(next.workflowMeta);
+    historyRef.current.push({ nodes: clone(nodes), edges: clone(edges), workflowMeta: clone(workflowMeta) });
+    setNodes(next.nodes); setEdges(next.edges); setWorkflowMeta(next.workflowMeta);
   }, [nodes, edges, workflowMeta, setNodes, setEdges]);
 
-
   const clearWorkflow = useCallback(() => {
-    const hasContent = nodes.length || edges.length;
-    if (!hasContent) return;
-
-    const confirmed = window.confirm('This will clear the current canvas. Continue?');
-    if (!confirmed) return;
-
-    pushHistory();
-    setNodes([]);
-    setEdges([]);
-    setWorkflowMeta(DEFAULT_WORKFLOW_META);
+    if (!nodes.length && !edges.length) return;
+    if (!window.confirm('This will clear the current canvas. Continue?')) return;
+    pushHistory(); setNodes([]); setEdges([]); setWorkflowMeta(DEFAULT_WORKFLOW_META);
   }, [nodes.length, edges.length, pushHistory, setEdges, setNodes]);
 
   useEffect(() => {
     const onKeyDown = (event) => {
       const activeTag = document.activeElement?.tagName?.toLowerCase();
-      const isTyping = activeTag === 'input' || activeTag === 'textarea' || document.activeElement?.isContentEditable;
-      if (isTyping) return;
+      if (activeTag === 'input' || activeTag === 'textarea' || document.activeElement?.isContentEditable) return;
 
       if (event.key === 'Delete' || event.key === 'Backspace') {
-        const selectedNodes = nodes.filter((node) => node.selected);
-        const selectedEdges = edges.filter((edge) => edge.selected);
+        const selectedNodes = nodes.filter((n) => n.selected);
+        const selectedEdges = edges.filter((e) => e.selected);
         if (!selectedNodes.length && !selectedEdges.length) return;
-
-        event.preventDefault();
-        pushHistory();
-
+        event.preventDefault(); pushHistory();
         const connectedEdges = getConnectedEdges(selectedNodes, edges);
-        const edgeIdsToDelete = new Set([...selectedEdges, ...connectedEdges].map((edge) => edge.id));
-        const nodeIdsToDelete = new Set(selectedNodes.map((node) => node.id));
-
-        setNodes((current) => current.filter((node) => !nodeIdsToDelete.has(node.id)));
-        setEdges((current) => current.filter((edge) => !edgeIdsToDelete.has(edge.id)));
+        const edgeIdsToDelete = new Set([...selectedEdges, ...connectedEdges].map((e) => e.id));
+        const nodeIdsToDelete = new Set(selectedNodes.map((n) => n.id));
+        setNodes((cur) => cur.filter((n) => !nodeIdsToDelete.has(n.id)));
+        setEdges((cur) => cur.filter((e) => !edgeIdsToDelete.has(e.id)));
       }
-
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
-        event.preventDefault();
-        undo();
-      }
-
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
-        event.preventDefault();
-        redo();
-      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); undo(); }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') { event.preventDefault(); redo(); }
     };
-
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [nodes, edges, pushHistory, redo, setEdges, setNodes, undo]);
 
   const onConnect = useCallback((params) => {
-    const sourceNode = nodes.find((node) => node.id === params.source);
-    const targetNode = nodes.find((node) => node.id === params.target);
+    const sourceNode = nodes.find((n) => n.id === params.source);
+    const targetNode = nodes.find((n) => n.id === params.target);
     const sourceType = sourceNode?.data?.nodeType;
     const targetType = targetNode?.data?.nodeType;
 
     if (!isConnectionAllowed(sourceType, targetType)) {
-      const message = getConnectionError(sourceType, targetType);
-      setConnectionError(message);
+      setConnectionError(getConnectionError(sourceType, targetType));
       window.setTimeout(() => setConnectionError(''), 4000);
       return;
     }
 
-    pushHistory();
-    const edgeNumber = getNextEdgeNumber(edges);
-    const id = makeEdgeId(params.source, params.target, edgeNumber);
+    const branch = sourceType === 'if_condition' ? params.sourceHandle : null;
+    if (sourceType === 'if_condition' && !['true', 'false'].includes(branch)) {
+      setConnectionError('If Condition connections must start from either the TRUE or FALSE handle.');
+      window.setTimeout(() => setConnectionError(''), 4000);
+      return;
+    }
 
+    if (sourceType === 'if_condition') {
+      const duplicateBranch = edges.some((edge) => (
+        edge.source === params.source
+        && ((edge.data?.branch || edge.sourceHandle) === branch)
+      ));
+
+      if (duplicateBranch) {
+        setConnectionError(`If Condition already has a ${branch.toUpperCase()} branch connection.`);
+        window.setTimeout(() => setConnectionError(''), 4000);
+        return;
+      }
+    }
+
+    pushHistory();
     const newEdge = {
-      id,
+      id: makeEdgeId(params.source, params.target, getNextEdgeNumber(edges)),
       source: params.source,
+      sourceHandle: params.sourceHandle || undefined,
       target: params.target,
+      targetHandle: params.targetHandle || undefined,
       type: 'editableEdge',
       markerEnd: { type: MarkerType.ArrowClosed },
-      data: { label: 'sequence' },
+      data: branch ? { label: branch, branch } : { label: 'sequence' },
     };
-
-    setEdges((current) => addEdge(newEdge, current));
+    setEdges((cur) => addEdge(newEdge, cur));
   }, [edges, nodes, pushHistory, setEdges]);
 
-  const onDragOver = useCallback((event) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'move';
-  }, []);
+  const onDragOver = useCallback((event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }, []);
 
   const onDrop = useCallback((event) => {
     event.preventDefault();
     if (!wrapperRef.current || !reactFlowInstance) return;
-
     const nodeType = event.dataTransfer.getData('application/reactflow');
     const template = nodeTemplates[nodeType];
     if (!template) return;
-
     const bounds = wrapperRef.current.getBoundingClientRect();
-    const position = reactFlowInstance.project({
-      x: event.clientX - bounds.left,
-      y: event.clientY - bounds.top,
-    });
-
-    const id = `${nodeType}_${getNodeNumber(nodes, nodeType)}`;
+    const position = reactFlowInstance.project({ x: event.clientX - bounds.left, y: event.clientY - bounds.top });
     const newNode = {
-      id,
-      type: 'workflowNode',
-      position,
-      data: {
-        label: template.displayName,
-        nodeType,
-        config: clone(template.defaultConfig),
-      },
+      id: `${nodeType}_${getNodeNumber(nodes, nodeType)}`, type: 'workflowNode', position,
+      data: { label: template.displayName, nodeType, config: clone(template.defaultConfig) },
     };
-
-    pushHistory();
-    setNodes((current) => current.concat(newNode));
+    pushHistory(); setNodes((cur) => cur.concat(newNode));
   }, [nodes, pushHistory, reactFlowInstance, setNodes]);
 
-  const updateWorkflowMeta = useCallback((key, value) => {
-    pushHistory();
-    setWorkflowMeta((current) => ({ ...current, [key]: value }));
-  }, [pushHistory]);
-
+  const updateWorkflowMeta = useCallback((key, value) => { pushHistory(); setWorkflowMeta((cur) => ({ ...cur, [key]: value })); }, [pushHistory]);
+  
   const updateNodeConfig = useCallback((nodeId, path, value) => {
     pushHistory();
-    setNodes((current) => current.map((node) => {
-      if (node.id !== nodeId) return node;
-      return {
-        ...node,
-        data: {
-          ...node.data,
-          config: setByPath(node.data.config || {}, path, value),
-        },
-      };
-    }));
+    setNodes((cur) => cur.map((n) => n.id !== nodeId ? n : { ...n, data: { ...n.data, config: setByPath(n.data.config || {}, path, value) } }));
   }, [pushHistory, setNodes]);
 
   const validateNow = useCallback(() => {
     const result = validateWorkflowState({ workflowMeta, nodes, edges });
     if (result.errors.length || result.warnings.length) {
       console.group('Workflow Validation');
-      result.errors.forEach((error) => console.error(error));
-      result.warnings.forEach((warning) => console.warn(warning));
+      result.errors.forEach((e) => console.error(e)); result.warnings.forEach((w) => console.warn(w));
       console.groupEnd();
     }
     return result;
@@ -338,27 +540,13 @@ export default function App() {
 
   const showValidation = useCallback(() => {
     const result = validateNow();
-    if (!result.errors.length && !result.warnings.length) {
-      window.alert('Validation passed.');
-      return;
-    }
-
-    const message = [
-      result.errors.length ? `Errors:\n- ${result.errors.join('\n- ')}` : '',
-      result.warnings.length ? `Warnings:\n- ${result.warnings.join('\n- ')}` : '',
-    ].filter(Boolean).join('\n\n');
-
-    window.alert(message);
+    if (!result.errors.length && !result.warnings.length) return window.alert('Validation passed.');
+    const msg = [result.errors.length ? `Errors:\n- ${result.errors.join('\n- ')}` : '', result.warnings.length ? `Warnings:\n- ${result.warnings.join('\n- ')}` : ''].filter(Boolean).join('\n\n');
+    window.alert(msg);
   }, [validateNow]);
 
   const highlightSimulationNode = useCallback((nodeId) => {
-    setNodes((current) => current.map((node) => ({
-      ...node,
-      data: {
-        ...node.data,
-        isSimulating: node.id === nodeId,
-      },
-    })));
+    setNodes((cur) => cur.map((n) => ({ ...n, data: { ...n.data, isSimulating: n.id === nodeId } })));
   }, [setNodes]);
 
   const addLatestExampleWorkflow = useCallback(() => {
@@ -369,204 +557,127 @@ export default function App() {
 
     pushHistory();
 
-    const exampleNodes = [
-      ['memory_runtime_context', 'memory', 80, 80, { use_memory: true, context_last_messages: 8, save_conversation_history: true }],
-      ['schedule_weekly_call', 'schedule', 80, 240, { schedule_type: 'weekly', day_of_week: 'monday', time: '10:30', timezone: 'Asia/Karachi', total_calls: 4 }],
-      ['summarizer_call_notes', 'summarizer', 80, 400, { instruction: 'Create a concise post-call summary for a banking support supervisor. Include caller intent, key questions, answers given, tools or knowledge base facts used, unresolved issues, promised follow-ups, and overall outcome. Do not include raw tool-call syntax.' }],
-      ['kb_nbp_docs', 'knowledge_base', 80, 580, { description: 'Banking support documents used to ground factual answers.', files: [{ id: 'nbp_product_pdf', path: 'NBP.pdf', metadata: { title: 'NBP Product Document' } }] }],
-      ['webhook_inbound_trigger', 'webhook', 80, 780, { webhook_url: 'https://example.com/webhooks/voice-workflow', active_time_window: { timezone: 'Asia/Karachi', start_time: '09:00', end_time: '18:00', days: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'] }, allowed_trigger_source: 'frontend_workflow_builder', trigger_action: 'start_outbound_call', voice_agent_to_activate: 'voice_agent_support' }],
-      ['whatsapp_trigger_customer_message', 'whatsapp_trigger', 80, 980, { whatsapp_number: '+923001234567', incoming_message_condition: 'Start when a customer sends a WhatsApp message containing a support request.', customer_phone_number: '{{incoming.customer_phone_number}}', message_content: '{{incoming.message_content}}' }],
-      ['sms_trigger_customer_message', 'sms_trigger', 80, 1140, { sms_number: '+923001234567', incoming_message_condition: 'Start when an incoming SMS contains a banking support question.' }],
-      ['slack_trigger_support_message', 'slack_trigger', 80, 1300, { workspace: 'NBP Support Workspace', channel: 'customer-escalations', trigger_keyword: 'urgent-support', sender: '{{incoming.sender}}', message_content: '{{incoming.message_content}}' }],
-      ['email_trigger_support_request', 'email_trigger', 80, 1480, { email_inbox: 'support@example.com', sender_condition: 'Accept messages from customers and approved partner domains.', subject_condition: 'Subject contains support, account, card, transfer, complaint, or app.', body_condition: 'Body contains a customer-service request related to NBP banking services.' }],
+    const exampleNodes = LATEST_EXAMPLE_WORKFLOW.nodes.map((item, index) => {
+      const template = nodeTemplates[item.type];
+      return {
+        id: item.id,
+        type: 'workflowNode',
+        position: getExampleNodePosition(item, index),
+        data: {
+          label: template?.displayName || item.type,
+          nodeType: item.type,
+          config: clone(item.config || {}),
+        },
+      };
+    });
 
-      ['voice_agent_support', 'voice_agent', 560, 620, { company_name: 'National Bank of Pakistan', company_description: 'A banking organization that supports account, card, transfer, mobile app, and customer-service questions.', voice_agent_name: 'Malik', agent_gender: 'male', main_prompt: 'Help callers with NBP banking questions in the same language they use. Use clear English for English callers and simple Pakistani Roman Urdu for Urdu or mixed Urdu callers. Keep answers brief, direct, and phone-friendly. Ask one short clarification question if the caller intent is unclear, and never make up policy details.', dos: ['Reply in English when the caller speaks English.', 'Reply in simple Pakistani Roman Urdu when the caller speaks Urdu, Roman Urdu, or mixed Urdu.', 'Keep every answer concise: normally 1-3 short spoken sentences.', 'Use knowledge base facts for product, fee, card, account, transfer, app, or policy questions.', 'Ask one short clarification question if the caller intent is unclear.'], donts: ['Do not mention internal workflow nodes, vector databases, embeddings, retrieved chunks, or tool calls.', 'Do not answer outside the company support domain.', 'Do not invent fees, limits, requirements, policies, or timelines.', 'Do not give long explanations unless the caller asks for details.', 'Do not use markdown, bullet points, headings, or numbered lists in spoken replies.'], initial_greeting: 'Hello, Malik speaking from National Bank of Pakistan. How can I help you?', purpose: 'Provide concise NBP customer support over a live outbound voice call, answer banking questions accurately, and use the knowledge base for factual policy or product details.' }],
-      ['tool_call_kb_lookup', 'tool_call', 980, 220, { condition: 'Use this tool when the caller asks a specific factual question about accounts, cards, transfers, app login, OTP, PIN, fees, limits, requirements, complaints, or branch services.' }],
-      ['message_out_of_scope', 'message', 980, 400, { condition: 'Use when the caller asks anything unrelated to banking, NBP, accounts, cards, transfers, mobile app, OTP, PIN, fees, limits, requirements, complaints, or branch services.', message: 'This is out of my scope. I can only give you answers related to banking.' }],
-      ['db_logs_call_record', 'db_logs', 980, 580, { save_fields: { call_from: true, call_to: true, call_transcription: true, call_summary: true, call_time_and_date: true, call_status: true } }],
-      ['llm_custom_processing', 'llm', 980, 760, { prompt: 'Analyze the current conversation context and decide the next best action for this workflow. Keep the result concise and operational.' }],
-      ['end_call_when_resolved', 'end_call', 980, 940, { condition: 'Use when the caller confirms they have no more questions, says goodbye, asks to end the call, or the workflow goal is completed.', message_before_ending: 'Thank you for contacting us. Khuda hafiz.' }],
-
-      ['messaging_whatsapp_reply', 'messaging_app', 980, 1120, { app_type: 'whatsapp_message', recipient_number: '{{whatsapp_trigger_customer_message.customer_phone_number}}', message_text: 'Thank you for contacting National Bank of Pakistan. How can we help you today?', template_name: 'customer_support_reply', variables: { customer_name: '{{customer.name}}', company_name: 'National Bank of Pakistan' } }],
-      ['messaging_sms_reply', 'messaging_app', 980, 1300, { app_type: 'sms_message', recipient_number: '{{incoming.sender_number}}', message_text: 'Thank you for contacting NBP support. Please share your question, but never send your PIN or OTP.' }],
-      ['messaging_slack_update', 'messaging_app', 980, 1480, { app_type: 'slack_message', workspace: 'NBP Support Workspace', channel_or_user: 'customer-escalations', message_text: 'A customer support interaction requires review.', attach_call_summary: true }],
-      ['messaging_email_reply', 'messaging_app', 980, 1660, { app_type: 'email_send', to: ['{{email_trigger_support_request.sender_email}}'], cc: [], bcc: [], subject: 'Re: {{email_trigger_support_request.subject}}', body: 'Thank you for contacting National Bank of Pakistan support. We received your request and will assist you shortly.' }],
-
-      ['tool_call_mysql_lookup', 'tool_call', 1400, 220, { condition: 'Use this tool only when the workflow needs permitted customer or operational data stored in the connected MySQL database.' }],
-      ['mysql_customer_database', 'database_connection', 1780, 220, { database_type: 'mysql_connection', connection_string: '${SECRET:MYSQL_CONNECTION_STRING}', connection_timeout_seconds: 30, ssl_enabled: true, read_only: true }],
-      ['tool_call_postgresql_lookup', 'tool_call', 1400, 420, { condition: 'Use this tool only when the workflow needs permitted customer or operational data stored in the connected PostgreSQL database.' }],
-      ['postgresql_customer_database', 'database_connection', 1780, 420, { database_type: 'postgresql_connection', connection_string: '${SECRET:POSTGRESQL_CONNECTION_STRING}', connection_timeout_seconds: 30, ssl_enabled: true, read_only: true }],
-      ['tool_call_microsoft_sql_lookup', 'tool_call', 1400, 620, { condition: 'Use this tool only when the workflow needs permitted customer or operational data stored in the connected Microsoft SQL Server database.' }],
-      ['microsoft_sql_customer_database', 'database_connection', 1780, 620, { database_type: 'microsoft_sql_connection', connection_string: '${SECRET:MICROSOFT_SQL_CONNECTION_STRING}', connection_timeout_seconds: 30, encrypt_connection: true, trust_server_certificate: false, read_only: true }],
-    ].map(([id, nodeType, x, y, config]) => ({
-      id,
-      type: 'workflowNode',
-      position: { x, y },
-      data: {
-        label: nodeTemplates[nodeType]?.displayName || nodeType,
-        nodeType,
-        config,
-      },
-    }));
-
-    const exampleEdges = [
-      ['memory_runtime_context', 'voice_agent_support'],
-      ['schedule_weekly_call', 'voice_agent_support'],
-      ['summarizer_call_notes', 'voice_agent_support'],
-      ['kb_nbp_docs', 'voice_agent_support'],
-      ['voice_agent_support', 'tool_call_kb_lookup'],
-      ['tool_call_kb_lookup', 'kb_nbp_docs'],
-      ['voice_agent_support', 'message_out_of_scope'],
-      ['webhook_inbound_trigger', 'voice_agent_support'],
-      ['voice_agent_support', 'db_logs_call_record'],
-      ['voice_agent_support', 'llm_custom_processing'],
-      ['llm_custom_processing', 'tool_call_kb_lookup'],
-      ['tool_call_kb_lookup', 'end_call_when_resolved'],
-      ['whatsapp_trigger_customer_message', 'voice_agent_support'],
-      ['voice_agent_support', 'messaging_whatsapp_reply'],
-      ['sms_trigger_customer_message', 'voice_agent_support'],
-      ['voice_agent_support', 'messaging_sms_reply'],
-      ['slack_trigger_support_message', 'voice_agent_support'],
-      ['voice_agent_support', 'messaging_slack_update'],
-      ['email_trigger_support_request', 'voice_agent_support'],
-      ['voice_agent_support', 'messaging_email_reply'],
-      ['voice_agent_support', 'tool_call_mysql_lookup'],
-      ['tool_call_mysql_lookup', 'mysql_customer_database'],
-      ['voice_agent_support', 'tool_call_postgresql_lookup'],
-      ['tool_call_postgresql_lookup', 'postgresql_customer_database'],
-      ['voice_agent_support', 'tool_call_microsoft_sql_lookup'],
-      ['tool_call_microsoft_sql_lookup', 'microsoft_sql_customer_database'],
-    ].map(([source, target], index) => ({
-      id: makeEdgeId(source, target, index + 1),
-      source,
-      target,
+    const exampleEdges = LATEST_EXAMPLE_WORKFLOW.connections.map((connection) => ({
+      id: connection.id,
+      source: connection.from_node_id,
+      sourceHandle: connection.branch || undefined,
+      target: connection.to_node_id,
       type: 'editableEdge',
       markerEnd: { type: MarkerType.ArrowClosed },
-      data: {},
+      data: connection.branch ? { label: connection.branch, branch: connection.branch } : { label: 'sequence' },
     }));
 
     setWorkflowMeta({
-      schema_version: '0.1',
-      workflow_id: 'dummy_complete_voice_workflow',
-      name: 'Complete Dummy Voice Workflow With Messaging Nodes',
-      phone_number: '03330330703',
+      schema_version: LATEST_EXAMPLE_WORKFLOW.schema_version || '0.5',
+      workflow_id: LATEST_EXAMPLE_WORKFLOW.workflow_id || '',
+      name: LATEST_EXAMPLE_WORKFLOW.name || '',
+      company_name: LATEST_EXAMPLE_WORKFLOW.company_name || '',
+      company_description: LATEST_EXAMPLE_WORKFLOW.company_description || '',
+      phone_number: LATEST_EXAMPLE_WORKFLOW.phone_number || '',
     });
     setNodes(exampleNodes);
     setEdges(exampleEdges);
     window.setTimeout(() => reactFlowInstance?.fitView({ padding: 0.2, duration: 500 }), 100);
   }, [edges.length, nodes.length, pushHistory, reactFlowInstance, setEdges, setNodes]);
 
+
   const onResizeRightPanelStart = (event) => {
     event.preventDefault();
     const startX = event.clientX;
     const startWidth = rightPanelWidth;
-
-    const onMove = (moveEvent) => {
-      const delta = startX - moveEvent.clientX;
-      const nextWidth = Math.min(620, Math.max(320, startWidth + delta));
-      setRightPanelWidth(nextWidth);
-    };
-
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    const onMove = (moveEvent) => setRightPanelWidth(Math.min(620, Math.max(320, startWidth + (startX - moveEvent.clientX))));
+    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
   };
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-gray-100 text-gray-900 overflow-hidden">
-      <header className="h-14 shrink-0 border-b border-slate-200 bg-white flex items-center px-3 gap-1">
-        <div className="flex items-center gap-2 pr-3 mr-2 border-r border-slate-200 min-w-[210px]">
-          <div className="h-7 w-7 rounded-md bg-blue-600 text-white flex items-center justify-center font-black text-xs">
-            AI
-          </div>
-          <div className="min-w-0">
-            <h1 className="text-[12.5px] font-bold leading-tight text-slate-900 truncate">Call Center Workflow Builder</h1>
-            <p className="text-[10px] text-slate-400 truncate">Visual configuration builder</p>
+    <div className="h-screen w-screen flex flex-col bg-slate-50 text-slate-900 overflow-hidden font-sans">
+      
+      {/* 
+        TOPBAR: Clean white header matching the provided image style 
+        with icon-above-text buttons in the center 
+      */}
+      <header className="h-[60px] shrink-0 border-b border-slate-200 bg-white flex items-center justify-between px-4">
+        
+        {/* Left: Project Context */}
+        <div className="flex items-center gap-3 w-1/4">
+          <div className="text-slate-400">🔒</div>
+          <div>
+            <h1 className="text-sm font-bold leading-tight text-slate-800">AI Call Center</h1>
+            <p className="text-[11px] text-slate-500">Workflow configuration</p>
           </div>
         </div>
 
-        <ToolbarGroup>
-          <ToolbarButton icon="↶" label="Undo" onClick={undo} title="Undo" />
-          <ToolbarButton icon="↷" label="Redo" onClick={redo} title="Redo" />
-          <ToolbarButton icon="⌫" label="Clear" onClick={clearWorkflow} title="Clear canvas" />
-        </ToolbarGroup>
+        {/* Center: Main Editor Tools (Icon above text) */}
+        <div className="flex items-center gap-1 flex-1 justify-center border-x border-slate-100 px-4">
+          <TopbarButton icon="↶" label="Undo" onClick={undo} />
+          <TopbarButton icon="↷" label="Redo" onClick={redo} />
+          <TopbarButton icon="⌫" label="Clear" onClick={clearWorkflow} />
+          <div className="h-8 w-px bg-slate-200 mx-2" />
+          <TopbarButton icon="▦" label="Example" onClick={addLatestExampleWorkflow} />
+          <TopbarButton icon="☑" label="Validate" onClick={showValidation} />
+        </div>
 
-        <ToolbarGroup>
-          <ToolbarButton icon="▦" label="Example" onClick={addLatestExampleWorkflow} title="Load example workflow" />
-          <ToolbarButton icon="☑" label="Validate" onClick={showValidation} title="Validate workflow" />
-        </ToolbarGroup>
+        {/* Right: Actions */}
+        <div className="flex items-center gap-1 justify-end w-1/4">
+          <TopbarButton icon="▶" label="Simulate" onClick={() => setSimulationOpen(true)} className="text-blue-600 hover:bg-blue-50" />
+        </div>
 
-        <div className="flex-1" />
-
-        <ToolbarButton icon="▶" label="Simulate" onClick={() => setSimulationOpen(true)} title="Play simulation" primary />
       </header>
 
       <div className="flex-1 flex min-h-0">
         <Sidebar />
 
-        <main className="flex-1 min-w-0 flex flex-col relative">
+        <main className="flex-1 min-w-0 flex flex-col relative bg-white">
           {connectionError && (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-red-600 text-white px-4 py-2 rounded-xl shadow-lg text-sm">
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-red-600 text-white px-4 py-2 rounded shadow-lg text-sm">
               {connectionError}
             </div>
           )}
 
           <div ref={wrapperRef} className="flex-1 min-h-0">
             <ReactFlow
-              nodes={nodes}
-              edges={edges}
-              nodeTypes={nodeTypes}
-              edgeTypes={edgeTypes}
-              onNodesChange={onNodesChange}
-              onEdgesChange={onEdgesChange}
-              onConnect={onConnect}
-              onInit={setReactFlowInstance}
-              onDrop={onDrop}
-              onDragOver={onDragOver}
-              fitView
-              deleteKeyCode={null}
-              multiSelectionKeyCode="Shift"
+              nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
+              onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect}
+              onInit={setReactFlowInstance} onDrop={onDrop} onDragOver={onDragOver}
+              fitView deleteKeyCode={null} multiSelectionKeyCode="Shift"
             >
-              <Background gap={20} size={1} />
-              <Controls />
-              <MiniMap pannable zoomable />
+              <Background gap={20} size={1} color="#e2e8f0" />
+              <Controls className="bg-white border-slate-200 shadow-sm" />
+              <MiniMap pannable zoomable className="border-slate-200 shadow-sm" />
             </ReactFlow>
           </div>
 
-          <WorkflowActions
-            workflowJson={workflowJson}
-            onValidate={validateNow}
-            saveEndpoint={saveEndpoint}
-          />
+          <WorkflowActions workflowJson={workflowJson} onValidate={validateNow} saveEndpoint={saveEndpoint} />
 
           <SimulationPanel
-            isOpen={simulationOpen}
-            onClose={() => {
-              setSimulationOpen(false);
-              highlightSimulationNode(null);
-            }}
-            nodes={nodes}
-            edges={edges}
-            onHighlight={highlightSimulationNode}
+            isOpen={simulationOpen} onClose={() => { setSimulationOpen(false); highlightSimulationNode(null); }}
+            nodes={nodes} edges={edges} onHighlight={highlightSimulationNode}
           />
         </main>
 
         <div
           onMouseDown={onResizeRightPanelStart}
-          className="w-1.5 cursor-col-resize bg-gray-200 hover:bg-blue-400 transition-colors"
-          title="Drag to resize configuration panel"
+          className="w-1 cursor-col-resize bg-slate-200 hover:bg-blue-400 transition-colors"
         />
 
         <ConfigSidebar
-          width={rightPanelWidth}
-          workflowMeta={workflowMeta}
-          onWorkflowMetaChange={updateWorkflowMeta}
-          selectedNode={selectedNode}
-          onNodeConfigChange={updateNodeConfig}
+          width={rightPanelWidth} workflowMeta={workflowMeta} onWorkflowMetaChange={updateWorkflowMeta}
+          selectedNode={selectedNode} onNodeConfigChange={updateNodeConfig}
         />
       </div>
     </div>

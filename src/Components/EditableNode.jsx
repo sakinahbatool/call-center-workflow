@@ -97,16 +97,25 @@ export default function EditableNode({ data, selected }) {
 
       {/* ---- Polygon shapes: solid fill, no card chrome ---- */}
       {isPoly && (
-        <div
-          style={shape.style}
-          className={`h-full w-full border-2 ${template.accent || 'border-slate-400 bg-slate-50'} flex flex-col items-center justify-center gap-1 px-6 text-center shadow-sm transition-transform ${ringClass} ${!ringClass && 'hover:brightness-95'}`}
-        >
-          <div className="text-lg leading-none">{template.icon}</div>
-          <div className="text-xs font-bold text-slate-800 leading-tight line-clamp-2">{template.displayName}</div>
-          <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${statusClass}`}>
-            {ready ? 'Ready' : `${missingCount} missing`}
-          </span>
-        </div>
+        <>
+          {data?.isSimulating && (
+            <div
+              style={shape.style}
+              className="absolute -inset-[6px] bg-emerald-400 pointer-events-none"
+            />
+          )}
+
+          <div
+            style={shape.style}
+            className={`relative z-10 h-full w-full border-2 ${template.accent || 'border-slate-400 bg-slate-50'} flex flex-col items-center justify-center gap-1 px-6 text-center shadow-sm transition-transform ${selected ? 'ring-[3px] ring-blue-400' : ''} ${!selected && !data?.isSimulating ? 'hover:brightness-95' : ''}`}
+          >
+            <div className="text-lg leading-none">{template.icon}</div>
+            <div className="text-xs font-bold text-slate-800 leading-tight line-clamp-2">{template.displayName}</div>
+            <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${statusClass}`}>
+              {ready ? 'Ready' : `${missingCount} missing`}
+            </span>
+          </div>
+        </>
       )}
 
       {/* ---- Cylinder (database) ---- */}
@@ -168,8 +177,33 @@ export default function EditableNode({ data, selected }) {
         </div>
       )}
 
-      <Handle type="source" position={Position.Bottom} className={sourceHandleClass} />
-      <Handle type="source" position={Position.Right} className={sourceHandleClass} />
+      {nodeType === 'if_condition' ? (
+        <>
+          <Handle
+            id="true"
+            type="source"
+            position={Position.Bottom}
+            className="!bg-emerald-600 !w-3 !h-3 !border-2 !border-white"
+          />
+          <Handle
+            id="false"
+            type="source"
+            position={Position.Right}
+            className="!bg-rose-600 !w-3 !h-3 !border-2 !border-white"
+          />
+          <span className="absolute left-1/2 -translate-x-1/2 -bottom-6 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[9px] font-bold text-emerald-700 pointer-events-none">
+            TRUE
+          </span>
+          <span className="absolute -right-12 top-1/2 -translate-y-1/2 rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[9px] font-bold text-rose-700 pointer-events-none">
+            FALSE
+          </span>
+        </>
+      ) : (
+        <>
+          <Handle type="source" position={Position.Bottom} className={sourceHandleClass} />
+          <Handle type="source" position={Position.Right} className={sourceHandleClass} />
+        </>
+      )}
     </div>
   );
 }
