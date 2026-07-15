@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import nodeTemplates, { getNodeFields, getSubtypeDisplay } from '../utils/nodeTemplates';
 import { getByPath } from '../utils/objectPath';
 import { uploadDocument } from '../utils/apiClient';
+import Toast from './Toast';
 
 function FieldLabel({ field }) {
   return (
@@ -60,10 +61,23 @@ function JsonObjectInput({ value, onChange }) {
 function FileArrayInput({ value, onChange, workflowId }) {
   const files = Array.isArray(value) ? value : [];
   const [uploadStatus, setUploadStatus] = useState('');
+  const [toast, setToast] = useState(null);
+
+  const showToast = (type, title, message, duration) => {
+    setToast({ type, title, message, duration });
+  };
 
   const handleFiles = async (event) => {
     const selected = Array.from(event.target.files || []);
     if (selected.length === 0) return;
+
+    if (!workflowId?.trim()) {
+      const message = 'Please enter Workflow ID before uploading Knowledge Base files.';
+      setUploadStatus(message);
+      showToast('error', 'Workflow ID required', message, 7000);
+      event.target.value = '';
+      return;
+    }
 
     setUploadStatus(`Uploading ${selected.length} file(s)...`);
 
@@ -94,9 +108,13 @@ function FileArrayInput({ value, onChange, workflowId }) {
     }
 
     if (failedFiles.length > 0) {
-      setUploadStatus(`Uploaded ${uploadedFiles.length} file(s). Failed: ${failedFiles.join('; ')}`);
+      const message = `Uploaded ${uploadedFiles.length} file(s). Failed: ${failedFiles.join('; ')}`;
+      setUploadStatus(message);
+      showToast('error', 'Document upload failed', message, 10000);
     } else {
-      setUploadStatus(`Uploaded ${uploadedFiles.length} file(s) successfully.`);
+      const message = `Uploaded ${uploadedFiles.length} file(s) successfully.`;
+      setUploadStatus(message);
+      showToast('success', 'Document uploaded', message);
     }
 
     event.target.value = '';
@@ -108,6 +126,7 @@ function FileArrayInput({ value, onChange, workflowId }) {
 
   return (
     <div className="space-y-2">
+      <Toast toast={toast} onClose={() => setToast(null)} />
       <input
         type="file"
         multiple
@@ -117,6 +136,11 @@ function FileArrayInput({ value, onChange, workflowId }) {
       <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
 Files are uploaded to the document API. The workflow JSON stores file metadata only.
       </p>
+      {uploadStatus && (
+        <p className="text-[11px] text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-2 py-1 break-words">
+          {uploadStatus}
+        </p>
+      )}
       <div className="space-y-2">
         {files.map((file) => (
           <div key={file.id} className="flex items-center justify-between gap-2 border rounded-lg px-3 py-2 bg-gray-50">

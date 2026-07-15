@@ -1,28 +1,62 @@
 import React, { useState } from 'react';
 import { downloadJson } from '../utils/workflowCompiler';
 import { uploadWorkflowJson } from '../utils/apiClient';
+import Toast from './Toast';
+
+function getValidationMessage(result) {
+  if (!result?.errors?.length) return '';
+
+  const visibleErrors = result.errors.slice(0, 6);
+  const remainingCount = result.errors.length - visibleErrors.length;
+
+  return [
+    ...visibleErrors.map((error) => `• ${error}`),
+    remainingCount > 0 ? `• +${remainingCount} more issue(s)` : '',
+  ].filter(Boolean).join('\n');
+}
 
 export default function WorkflowActions({ workflowJson, onValidate, saveEndpoint }) {
   const [status, setStatus] = useState('');
   const [showJson, setShowJson] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState(null);
 
   const filename = `${workflowJson.workflow_id || 'workflow'}.json`;
 
+  const showToast = (type, title, message, duration) => {
+    setToast({ type, title, message, duration });
+  };
+
   const copyJson = async () => {
-    await navigator.clipboard.writeText(JSON.stringify(workflowJson, null, 2));
-    setStatus('JSON copied to clipboard.');
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(workflowJson, null, 2));
+      setStatus('JSON copied to clipboard.');
+      showToast('success', 'Copied', 'Workflow JSON copied to clipboard.');
+    } catch (error) {
+      const message = error.message || 'Could not copy JSON to clipboard.';
+      setStatus(message);
+      showToast('error', 'Copy failed', message);
+    }
   };
 
   const download = () => {
-    downloadJson(filename, workflowJson);
-    setStatus('JSON downloaded.');
+    try {
+      downloadJson(filename, workflowJson);
+      setStatus('JSON downloaded.');
+      showToast('success', 'Downloaded', `${filename} downloaded successfully.`);
+    } catch (error) {
+      const message = error.message || 'Could not download JSON.';
+      setStatus(message);
+      showToast('error', 'Download failed', message);
+    }
   };
 
   const generateAndSave = async () => {
     const result = onValidate?.();
     if (result && result.errors.length > 0) {
+      const message = getValidationMessage(result);
       setStatus(`Cannot save. Fix ${result.errors.length} validation issue(s).`);
+      showToast('error', 'Validation failed', message, 9000);
       return;
     }
 
@@ -36,8 +70,11 @@ export default function WorkflowActions({ workflowJson, onValidate, saveEndpoint
       });
 
       setStatus('Workflow JSON uploaded successfully.');
+      showToast('success', 'Workflow saved', 'Workflow JSON uploaded successfully.');
     } catch (error) {
-      setStatus(error.message || 'JSON upload failed.');
+      const message = error.message || 'JSON upload failed.';
+      setStatus(message);
+      showToast('error', 'JSON upload failed', message, 9000);
     } finally {
       setSaving(false);
     }
@@ -45,6 +82,8 @@ export default function WorkflowActions({ workflowJson, onValidate, saveEndpoint
 
   return (
     <div className="border-t bg-white">
+      <Toast toast={toast} onClose={() => setToast(null)} />
+
       <div className="px-4 py-3 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-gray-900">Workflow Output</div>
